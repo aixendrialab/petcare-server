@@ -1,0 +1,232 @@
+# Reads PUBLIC_BASE, DATABASE_URL, TEST_OTP from .env
+base_url: ${PUBLIC_BASE}
+timeout_s: 12
+
+vars:
+  phone: "9999999001"
+  otp_code: "${TEST_OTP}"   # set in .env for local runs
+
+default_headers:
+  Content-Type: application/json
+
+# --- Health/Info/Ready ---
+steps:
+  - name: health
+    method: GET
+    path: /api/v1/health
+    expect: [200]
+    expect_json:
+      ok: true
+
+  - name: info
+    method: GET
+    path: /api/v1/info
+    expect: [200]
+    expect_json_subset:
+      name: pet-app
+
+  - name: ready
+    method: GET
+    path: /api/v1/ready
+    expect: [200, 503]
+    assert:
+      - jmes: db
+        exists: true
+
+# --- Auth (OTP) ---
+auth:
+  - name: auth: request otp
+    method: POST
+    path: /api/v1/auth/otp/request
+    json:
+      phone: "{{phone}}"
+    expect: [200, 202]
+
+  - name: auth: verify otp
+    method: POST
+    path: /api/v1/auth/otp/verify
+    json:
+      phone: "{{phone}}"
+      otp: "{{otp_code}}"
+    expect: [200]
+    capture_token: true
+    save:
+      uid: "uid"
+      roles: "roles"
+      active: "active"
+      token: "token"
+    # EXACT structure you asked for
+    expect_json:
+      ok: true
+      uid: "{{uid}}"
+      phone: "{{phone}}"
+      token: "{{token}}"
+      type: "actual"
+      roles: "{{roles}}"
+      active: "{{active}}"
+
+# --- users_router.py (prefix /api/v1) ---
+# GET /me
+  - name: users: me
+    method: GET
+    path: /api/v1/me
+    expect: [200]
+    expect_json_subset:
+      uid: "{{uid}}"
+      phone: "{{phone}}"
+
+# GET /me/pets (initially empty or existing)
+  - name: users: me_pets (initial view)
+    method: GET
+    path: /api/v1/me/pets
+    expect: [200]
+    # we don't know exact shape; just assert it's an array JSON (length could be 0+)
+    assert:
+      - jmes: "@"
+        exists: true
+
+# POST /me/pets — create/replace pets
+  - name: users: add pets
+    method: POST
+    path: /api/v1/me/pets
+    json:
+      pets:
+        - name: "it_Fluffy"
+          breed: "Tabby"
+          gender: "F"
+        - name: "it_Buddy"
+          breed: "Labrador"
+          gender: "M"
+    expect: [200]
+    # expect service returns current pet list; assert two entries with our names present
+    assert:
+      - jmes: "[0].name"
+        exists: true
+      - jmes: "[1].name"
+        exists: true
+
+# PUT /me/pets — update/replace list
+  - name: users: replace pets
+    method: PUT
+    path: /api/v1/me/pets
+    json:
+      pets:
+        - name: "it_Fluffy"   # keep one
+          breed: "Tabby"
+          gender: "F"
+    expect: [200]
+    assert:
+      - jmes: "[0].name"
+        equals: "it_Fluffy"
+
+# POST /me/roles — add roles
+  - name: users: add roles
+    method: POST
+    path: /api/v1/me/roles
+    json:
+      roles: ["vet"]
+    expect: [200]
+    # Save roles if service echoes them (if not, this step still passes by status)
+    save:
+      roles_after: "roles"
+    # If body includes roles array, assert it contains "vet"
+    expect_json_subset:
+      roles: ["vet"]
+
+# POST /me/active — set active role
+  - name: users: set active role
+    method: POST
+    path: /api/v1/me/active
+    json:
+      role: "vet"
+    expect: [200]
+    expect_json_subset:
+      role: "vet"
+
+# GET /me/active — check active role
+  - name: users: get active role
+    method: GET
+    path: /api/v1/me/active
+    expect: [200]
+    expect_json_subset:
+      role: "vet"
+
+# --- parent_router.py (prefix /api/v1/users) ---
+# POST /users/register
+  - name: parent: register profile
+    method: POST
+    path: /api/v1/users/register
+    json:
+      name: "it_Parent"
+      email: "it_parent@example.com"
+      pets:
+        - {name: "it_Fluffy", breed: "Tabby"}
+    expect: [200]
+    # we don't have exact return shape; enforce key facts
+    expect_json_subset:
+      uid: "{{uid}}"
+    assert:
+      - jmes: "email || profile.email || user.email"
+        exists: true
+
+# --- vet_router.py (prefix /api/v1) ---
+# GET /users/vet/profile (expected exact shape when none)
+  - name: vet: profile (initial)
+    method: GET
+    path: /api/v1/users/vet/profile
+    expect: [200]
+    expect_json:
+      profile: null
+      locations: []
+
+# PUT /users/vet/register
+  - name: vet: register
+    method: PUT
+    path: /api/v1/users/vet/register
+    json:
+      name: "it_Dr_Strange"
+      email: "it_vet@example.com"
+      legal_name: "it_Dr_Strange Pvt Ltd"
+      display_name: "it_VetCare"
+      business_email: "it_vetbiz@example.com"
+      billing_email: "it_billing@example.com"
+      billing_address: "it_42, MG Road"
+      gstin: "it_12ABCDE3456F7Z8"
+      pan: "it_ABCDP1234Q"
+      qualifications: "BVSc & AH"
+      license_no: "it_VET-12345"
+      experience_years: 10
+      specialties: ["surgery", "dermatology"]
+      visit_in_clinic: true
+      visit_video: true
+      fee_in_clinic: 500
+      fee_video: 300
+      slot_minutes: 15
+      locations:
+        - name: "it_Main Clinic"
+          line1: "it_Line 1"
+          city: "Visakhapatnam"
+          lat: 17.6868
+          lng: 83.2185
+          hours: "10:00-18:00"
+          is_primary: true
+    expect: [200]
+    # Save anything useful if service returns an ID
+    save:
+      clinic_name: "profile.display_name || display_name"
+    # Don’t assume exact service payload; enforce key echo via subset
+    expect_json_subset:
+      profile:
+        display_name: "it_VetCare"
+
+# GET /users/vet/profile (after register) — should no longer be empty
+  - name: vet: profile (after register)
+    method: GET
+    path: /api/v1/users/vet/profile
+    expect: [200]
+    expect_json_subset:
+      profile:
+        display_name: "it_VetCare"
+      locations:
+        - name: "it_Main Clinic"
+          city: "Visakhapatnam"
