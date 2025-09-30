@@ -1,4 +1,5 @@
-version: '3.9'
+version: "3.9"
+
 services:
   db:
     image: postgres:15
@@ -6,17 +7,36 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: petcare
-    ports: ["5432:5432"]
-    volumes: [ "pg:/var/lib/postgresql/data" ]
-  redis:
-    image: redis:7
-    ports: ["6379:6379"]
-  minio:
-    image: minio/minio:latest
+    ports:
+      - "8432:5432"        # host 8432 -> container 5432
+    volumes:
+      - pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d petcare"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    command: server /data --console-address ":9001"
-    ports: ["9000:9000","9001:9001"]
-    volumes: [ "s3:/data" ]
-volumes: { pg: {}, s3: {} }
+      # Container-to-container DSN (IMPORTANT: 5432 here, not 8432)
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/petcare
+      HOST: 0.0.0.0
+      PORT: 8001
+      APP_IMPORT: app.main:app
+    ports:
+      - "8001:8001"
+    restart: unless-stopped
+    # For live dev reloads inside Docker, you can also mount the code and add --reload:
+    # volumes:
+    #   - ./:/app
+
+volumes:
+  pg: {}
