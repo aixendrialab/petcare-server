@@ -2,9 +2,9 @@
 
 -- Users (Asha has parent+vet; active role set to parent)
 INSERT INTO users (id, phone, email, name, active_role) VALUES
-  (1, '09840185469', 'asha@example.com',         'Asha Rao',       'parent'),
-  (2, '9876543210',  'krish@example.com',        'Krish Malhotra', NULL),
-  (3, '9123456780',  'meera.shah@pawsclinic.com','Dr. Meera Shah', 'vet')
+  (1, '+919999', 'asha@example.com',         'Asha Rao',       'parent'),
+  (2, '+918888',  'krish@example.com',        'Krish Malhotra', NULL),
+  (3, '+917777',  'meera.shah@pawsclinic.com','Dr. Meera Shah', 'vet')
 ON CONFLICT (id) DO NOTHING;
 
 -- Roles

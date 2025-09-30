@@ -47,6 +47,9 @@ start-docker:  ## Start db, redis, minio, api (tolerant/idempotent)
 stop-docker:   ## Stop all docker services
 	docker compose down
 
+info: ## Show resolved settings (compose/db/url)
+	./run-stack.sh info
+	
 api-start:  ## Start docker service api)
 	docker compose up -d api
 	
