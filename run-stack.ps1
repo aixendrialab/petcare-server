@@ -169,7 +169,7 @@ $UI_DIR            = _IfEmpty $env:UI_DIR             ''
 $UI_PORT           = [int](_IfEmpty $env:UI_PORT      '5173')
 
 $PIP_DEFAULT_TIMEOUT = [int](_IfEmpty $env:PIP_DEFAULT_TIMEOUT '60')
-$RUN_IN_FOREGROUND = [int](_IfEmpty $env:RUN_IN_FOREGROUND '0')
+$RUN_IN_FOREGROUND = [int](_IfEmpty $env:RUN_IN_FOREGROUND '1')
 $ENV_PATH          = _IfEmpty $env:ENV_FILE           (Join-Path $PSScriptRoot 'env')
 $INSTALL_DEPS      = [int](_IfEmpty $env:INSTALL_DEPS '1')
 
@@ -473,12 +473,18 @@ function Load-AppEnv {
 function Run-App {
   param([switch]$Daemon = $false)
   Load-AppEnv
-  Ensure-Venv
+
+  # assume venv is already prepared in STEP 4/5
+  if (-not $script:PYBIN -or -not (Test-Path $script:PYBIN)) {
+    Fail "venv not ready; run Ensure-Venv first (bug: missing PYBIN)"
+  }
+
   $UVI = Join-Path $VENV_PATH 'Scripts\uvicorn.exe'
   if (-not (Test-Path $UVI)) {
     Write-Host " - uvicorn not found; installing uvicorn[standard]"
     & $script:PYBIN -m pip install uvicorn[standard] | Out-Null
   }
+
   $LOG = Join-Path $RUN_DIR 'uvicorn.out'
   $ERR = Join-Path $RUN_DIR 'uvicorn.err'
   $appStr = $APP_IMPORT
