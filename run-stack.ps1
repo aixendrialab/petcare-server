@@ -17,40 +17,43 @@ function Trace-Enter {
 }
 
 function Resolve-Python311 {
-    # Guard: common Windows alias that breaks things
     if ($env:PY_EXE -eq 'python3') {
         Write-Host " - ignoring PY_EXE=python3 (Microsoft Store alias)" -ForegroundColor Yellow
         Remove-Item Env:\PY_EXE -ErrorAction SilentlyContinue
     }
 
-    # 1) Respect explicit override
+    # Respect override: supports "py -3.11" or a full path with args
     if ($env:PY_EXE) {
         try {
-            $ver = & $env:PY_EXE -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+            $parts = $env:PY_EXE -split '\s+'
+            $head  = $parts[0]
+            $tail  = @()
+            if ($parts.Length -gt 1) { $tail = $parts[1..($parts.Length-1)] }
+
+            $ver = & $head @($tail + @('-c', "import sys; print('{}.{}'.format(sys.version_info.major, sys.version_info.minor))"))
             if ($LASTEXITCODE -eq 0 -and $ver -like '3.11*') {
-                $exe = & $env:PY_EXE -c "import sys,shlex; print(sys.executable)"
+                $exe = & $head @($tail + @('-c', 'import sys; print(sys.executable)'))
                 return $exe
             }
         } catch {}
         Write-Host " - PY_EXE is set but not 3.11; ignoring: '$($env:PY_EXE)'" -ForegroundColor Yellow
     }
 
-    # 2) Try Windows launcher
+    # Windows launcher
     try {
         $exe = & py -3.11 -c "import sys; print(sys.executable)"
         if ($LASTEXITCODE -eq 0 -and $exe) { return $exe }
     } catch {}
 
-    # 3) Common direct installs
+    # Common installs
     $candidates = @(
         'C:\Python311\python.exe',
         "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
-        'python' # fallback to PATH (validated below)
+        'python'
     )
-
     foreach ($c in $candidates) {
         try {
-            $ver = & $c -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+            $ver = & $c -c "import sys; print('{}.{}'.format(sys.version_info.major, sys.version_info.minor))"
             if ($LASTEXITCODE -eq 0 -and $ver -like '3.11*') {
                 $exe = & $c -c "import sys; print(sys.executable)"
                 return $exe
@@ -61,44 +64,77 @@ function Resolve-Python311 {
     throw "Python 3.11 not found. Install it or set `$env:PY_EXE='py -3.11'."
 }
 
+
 function Ensure-Venv {
-    param(
-        [Parameter(Mandatory=$true)][string]$BasePy,   # resolved 3.11 python.exe
-        [Parameter(Mandatory=$true)][string]$VenvPath  # e.g., '.venv'
-    )
+  $basePy = Resolve-Python311
+  try { $verFull = & $basePy -c "import sys; print('.'.join(map(str, sys.version_info[:3])))" 2>$null } catch { $verFull = 'unknown' }
+  Write-Host "Resolved Python: $basePy (version $verFull)" -ForegroundColor Cyan
 
-    $venvPy = Join-Path $VenvPath 'Scripts\python.exe'
-    $venvCfg = Join-Path $VenvPath 'pyvenv.cfg'
+  $VENV_PATH = _IfEmpty $env:VENV_PATH '.venv'
+  $venvPy = Join-Path $VENV_PATH 'Scripts\python.exe'
 
-    $needsRebuild = $false
-    if (Test-Path $VenvPath) {
-        try {
-            $cfg = Get-Content $venvCfg -ErrorAction Stop
-            $homeLine = ($cfg | Where-Object { $_ -match '^\s*home\s*=\s*(.+)$' })
-            if ($homeLine) {
-                $home = $homeLine -replace '^\s*home\s*=\s*',''
-                # If venv base doesn't match chosen 3.11, rebuild
-                if (-not (Test-Path $venvPy) -or ($home -ne (Split-Path -Parent $BasePy))) {
-                    $needsRebuild = $true
-                }
-            } else {
-                $needsRebuild = $true
-            }
-        } catch {
-            $needsRebuild = $true
-        }
-    } else {
+  $needsRebuild = $false
+  if (Test-Path $VENV_PATH) {
+    try {
+      if (-not (Test-Path $venvPy)) {
         $needsRebuild = $true
+      } else {
+        $vMajMin = & $venvPy -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $vMajMin -or ($vMajMin -notlike '3.11*')) {
+          $needsRebuild = $true
+        }
+      }
+    } catch { $needsRebuild = $true }
+  } else {
+    $needsRebuild = $true
+  }
+
+  if ($needsRebuild) {
+    if (Test-Path $VENV_PATH) { Remove-Item -Recurse -Force $VENV_PATH }
+    Write-Host " - creating venv at $VENV_PATH (base: $basePy)"
+    & $basePy -m venv $VENV_PATH
+    if ($LASTEXITCODE -ne 0) { Fail "venv creation failed" }
+  } else {
+    Write-Host " - venv present: keeping existing Python 3.11 environment."
+  }
+
+  $script:PYBIN = $venvPy
+  $script:PIP   = Join-Path $VENV_PATH 'Scripts\pip.exe'
+
+  if (-not (Test-Path $script:PYBIN)) { Fail "venv Python not found at '$script:PYBIN'" }
+
+  Write-Host " - venv python: $script:PYBIN"
+  Write-Host " - venv pip   : $script:PIP"
+
+  if ($INSTALL_DEPS -eq 1) {
+    $timeout = [string]([int](_IfEmpty $env:PIP_DEFAULT_TIMEOUT '60'))
+    Write-Host " - upgrading pip/setuptools/wheel (timeout ${timeout}s)"
+    & $script:PYBIN -m pip --default-timeout $timeout install --upgrade pip setuptools wheel --no-input
+    if ($LASTEXITCODE -ne 0) { Fail "pip upgrade failed" }
+
+    $REQ_FILE = _IfEmpty $env:REQ_FILE (Join-Path $PSScriptRoot 'requirements.txt')
+    $REQ_DEV_FILE = _IfEmpty $env:REQ_DEV_FILE (Join-Path $PSScriptRoot 'requirements-dev.txt')
+
+    if (Test-Path $REQ_FILE) {
+      Write-Host " - pip install -r $REQ_FILE (timeout ${timeout}s)"
+      & $script:PYBIN -m pip --default-timeout $timeout install -r $REQ_FILE --no-input
+      if ($LASTEXITCODE -ne 0) { Fail "pip install -r $REQ_FILE failed" }
+    } else {
+      Write-Host " - requirements.txt not found; installing essentials"
+      & $script:PYBIN -m pip install uvicorn[standard] fastapi
+      if ($LASTEXITCODE -ne 0) { Fail "pip install essentials failed" }
     }
 
-    if ($needsRebuild) {
-        if (Test-Path $VenvPath) { Remove-Item -Recurse -Force $VenvPath }
-        & $BasePy -m venv $VenvPath
-        if ($LASTEXITCODE -ne 0) { throw "Failed to create venv at $VenvPath" }
+    if (Test-Path $REQ_DEV_FILE) {
+      Write-Host " - pip install -r $REQ_DEV_FILE (timeout ${timeout}s)"
+      & $script:PYBIN -m pip --default-timeout $timeout install -r $REQ_DEV_FILE --no-input
+      if ($LASTEXITCODE -ne 0) { Fail "pip install -r $REQ_DEV_FILE failed" }
     }
-
-    return $venvPy
+  } else {
+    Write-Host " - skipping pip install (fast mode)"
+  }
 }
+
 
 function Pip {
     param(
@@ -392,21 +428,62 @@ function Derive-DatabaseUrl {
   return "postgresql://$PG_USER`:$PG_PWD@$PG_HOST`:$PG_PORT/$PG_DB"
 }
 
+function Test-PyModule {
+  param([Parameter(Mandatory=$true)][string]$Name)
+  try {
+    & $script:PYBIN -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$Name') else 1)" 1>$null 2>$null
+    return ($LASTEXITCODE -eq 0)
+  } catch {
+    return $false
+  }
+}
+
 function Run-Tests {
   Step "STEP 5/5: Tests"
   if ($SKIP_TESTS -eq 1) { Write-Host " - SKIP_TESTS=1 set; skipping tests."; return }
 
+  # Ensure venv/python & pip objects exist (this won't reinstall unless missing)
   Ensure-Pip
 
-  # Neutralize environment that breaks Python layout on Windows
+  # Neutralize env that can confuse Python on Windows
   Remove-Item Env:\PYTHONHOME -ErrorAction SilentlyContinue
   Remove-Item Env:\PYTHONPATH -ErrorAction SilentlyContinue
   $env:PYTHONHOME = $null; $env:PYTHONPATH = $null
 
-  # Assume pytest is present (we already installed it in STEP 4/5)
-  Write-Host " - proceeding to run pytest"
+  $REQ_FILE     = _IfEmpty $env:REQ_FILE     (Join-Path $PSScriptRoot 'requirements.txt')
+  $REQ_DEV_FILE = _IfEmpty $env:REQ_DEV_FILE (Join-Path $PSScriptRoot 'requirements-dev.txt')
 
-  # Ensure DB URL for tests (auto-derive if not set)
+  # --- Ensure APP deps (fastapi, etc.) if missing ---------------------------
+  if (-not (Test-PyModule 'fastapi')) {
+    if (Test-Path $REQ_FILE) {
+      Write-Host " - installing app deps (requirements.txt)"
+      & $script:PYBIN -m pip install -r $REQ_FILE --no-input
+      if ($LASTEXITCODE -ne 0) { Fail "pip install -r $REQ_FILE failed" }
+    } else {
+      Write-Host " - requirements.txt not found; installing essentials (fastapi + uvicorn)"
+      & $script:PYBIN -m pip install fastapi uvicorn[standard]
+      if ($LASTEXITCODE -ne 0) { Fail "pip install essentials failed" }
+    }
+  } else {
+    Write-Host " - app deps already present" -ForegroundColor DarkGray
+  }
+
+  # --- Ensure TEST deps (pytest, etc.) if missing ---------------------------
+  if (-not (Test-PyModule 'pytest')) {
+    if (Test-Path $REQ_DEV_FILE) {
+      Write-Host " - installing test deps (requirements-dev.txt)"
+      & $script:PYBIN -m pip install -r $REQ_DEV_FILE --no-input
+      if ($LASTEXITCODE -ne 0) { Fail "pip install -r $REQ_DEV_FILE failed" }
+    } else {
+      Write-Host " - requirements-dev.txt not found; installing pytest basics"
+      & $script:PYBIN -m pip install pytest pytest-asyncio pytest-cov
+      if ($LASTEXITCODE -ne 0) { Fail "pip install pytest basics failed" }
+    }
+  } else {
+    Write-Host " - pytest already present" -ForegroundColor DarkGray
+  }
+
+  # --- DB URL for tests -----------------------------------------------------
   if (-not $env:DATABASE_URL -and -not $env:DATABASE_URL_TEST) {
     $PG_USER = _IfEmpty $env:PG_USER 'postgres'
     $PG_PWD  = _IfEmpty $env:PGPASSWORD 'postgres'
@@ -428,33 +505,23 @@ function Run-Tests {
     Write-Host " - DATABASE_URL_TEST already set" -ForegroundColor DarkGray
   }
 
-  # Make pytest deterministic & chatty
-  $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = '1'  # avoid random 3rd-party plugin hangs
-  $env:PYTHONUNBUFFERED = '1'               # flush prints immediately
+  # --- Pytest run -----------------------------------------------------------
+  $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = '1'
+  $env:PYTHONUNBUFFERED = '1'
 
-  # Build pytest args — verbose (-vv) to show every test name,
-  # -s to stream prints, -r a for full summary, --durations for slow tests
   $args = @('-m','pytest','-vv','-s','--maxfail=1','-r','a','--color=yes','--durations=10')
-  if ($PYTEST_ARGS) {
-    $args += ($PYTEST_ARGS -split '\s+')
-  } else {
-    $args += @('tests')
-  }
+  if ($PYTEST_ARGS) { $args += ($PYTEST_ARGS -split '\s+') } else { $args += @('tests') }
 
   Write-Host " - invoking (live): $script:PYBIN $($args -join ' ')" -ForegroundColor DarkGray
-
-  # Run directly so output streams to your console in real time
   & $script:PYBIN @args
   $exit = $LASTEXITCODE
 
-  if ($exit -eq 0) {
-    Write-Host " - tests PASSED"
-  } else {
-    Write-Host " - tests FAILED (exit $exit)" -ForegroundColor Yellow
-  }
+  if ($exit -eq 0) { Write-Host " - tests PASSED" } else { Write-Host " - tests FAILED (exit $exit)" -ForegroundColor Yellow }
 
   Remove-Item Env:\PYTEST_DISABLE_PLUGIN_AUTOLOAD -ErrorAction SilentlyContinue
 }
+
+
 
 # ----- App run/stop/status ----------------------------------------------------
 function Load-AppEnv {
