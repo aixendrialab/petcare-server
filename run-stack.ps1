@@ -475,9 +475,8 @@ function Run-App {
   Load-AppEnv
 
   # assume venv is already prepared in STEP 4/5
-  if (-not $script:PYBIN -or -not (Test-Path $script:PYBIN)) {
-    Fail "venv not ready; run Ensure-Venv first (bug: missing PYBIN)"
-  }
+  if (-not $script:PYBIN -or -not (Test-Path $script:PYBIN)) { Fail \"venv not ready; run Ensure-Venv first\" }
+
 
   $UVI = Join-Path $VENV_PATH 'Scripts\uvicorn.exe'
   if (-not (Test-Path $UVI)) {
@@ -571,8 +570,8 @@ Commands:
   ui-stop         - stop Expo web job
 "@ | Write-Host; break }
 
-  'fast'         { Write-Host "MODE: fast";   Ensure-Db; Apply-Schema; Apply-Seed; Ensure-Venv; Run-Tests; if ($RUN_IN_FOREGROUND -eq 1){ Run-App } else { Run-App -Daemon } }
-  'full'         { Write-Host "MODE: full";   Ensure-Db; Apply-Schema; Apply-Seed; Ensure-Venv; Run-Tests; if ($RUN_IN_FOREGROUND -eq 1){ Run-App } else { Run-App -Daemon } }
+  'fast'         { Write-Host "MODE: fast";   Ensure-Db; Ensure-Venv; $INSTALL_DEPS=0; Run-App }
+  'full'         { Write-Host "MODE: full";   Ensure-Db; Apply-Schema; Apply-Seed; Ensure-Venv; Run-Tests; $INSTALL_DEPS=0; Run-App }
   'schema'       { Ensure-Db; Apply-Schema }
   'schema_seed'  { Ensure-Db; Apply-Schema; Apply-Seed }
   'seed'         { Ensure-Db; Apply-Seed }
@@ -596,4 +595,5 @@ Commands:
   'doctor'       { Doctor }
   'ui-start'     { Ui-Start }
   'ui-stop'      { Ui-Stop }
+  'full-daemon'  { Write-Host "MODE: full-daemon"; Ensure-Db; Apply-Schema; Apply-Seed; Ensure-Venv; Run-Tests; $INSTALL_DEPS=0; Run-App -Daemon }
 }

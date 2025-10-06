@@ -190,3 +190,153 @@ make stop-docker             # tear down stack
 
 - **Inside‑Docker DB host/port**  
   Containers use container ports/hosts (e.g., `postgresql://…@db:5432/…`). Host‑mapped ports like `8432` are for **host apps** only.
+
+---
+
+## Windows / PowerShell Quick Start
+
+This project ships a PowerShell orchestrator that mirrors the Ubuntu/Makefile flow:
+
+**DB (docker) → schema → seed → venv + deps → tests → app**
+
+```powershell
+# From repo root in PowerShell
+# 1) Ensure Docker Desktop is running
+# 2) Ensure Python 3.11 is installed (see below)
+# 3) Run the full dev flow in the foreground (live logs):
+.
+./make full
+
+# Same flow, but run the app in the background (daemon/job):
+.
+./make full-daemon
+```
+
+### PowerShell Commands
+
+| Command | What it does |
+|---|---|
+| `.
+./make full` | DB up → schema → seed → deps → tests → run app **(foreground)** |
+| `.
+./make full-daemon` | Same as `full`, but run the app **in background** |
+| `.
+./make fast` | DB up → schema → seed → deps → tests → run app (foreground); fastest happy path |
+| `.
+./make schema_seed` | Apply schema + seed (tolerant) |
+| `.
+./make seed` | Apply seed only (tolerant) |
+| `.
+./make tests` | Run pytest suite |
+| `.
+./make start` | Start the app only (after deps) |
+| `.
+./make status` / `logs` / `stop` | Manage background job (`full-daemon`) |
+
+> Foreground vs background: Foreground prints live request/response logs to the console. Use **Ctrl+C** to stop. Background runs as a PowerShell job (`app-job`); use `status`, `logs`, and `stop` to manage it.
+
+---
+
+## Python on Windows: `python` vs `py` (and why we use `py -3.11`)
+
+- **`python`** → “first Python on PATH”. Could be any version—or a Microsoft Store alias that prints *“Python was not found…”*.
+- **`py`** → the **Windows Python Launcher**. It selects exact versions reliably:
+  - `py -3.11` → runs your installed Python **3.11**
+  - `py -3.13` → runs **3.13**, etc.
+
+The script prefers **Python 3.11**. If multiple Pythons are installed, `py -3.11` makes the choice unambiguous.
+
+**Install Python 3.11** (recommended):
+1. Download from the official site: https://www.python.org/downloads/release/python-3110/
+2. During install, check **“Add Python to PATH”** (and optionally **“Install for all users”**).
+3. Verify: `py -3.11 --version`
+
+**Important (avoid Microsoft Store traps):**
+- Windows Settings → Apps → Advanced app settings → **App execution aliases** → turn **off** **Python** and **Python 3**.
+
+If the script can’t find 3.11, it will say:
+```
+Python 3.11 not found. Install it or set $env:PY_EXE='py -3.11'.
+```
+
+You can pin a custom interpreter via env var:
+```powershell
+# session-only
+$env:PY_EXE = 'py -3.11'
+# or a full path
+$env:PY_EXE = 'C:\Python311\python.exe'
+```
+
+---
+
+## Virtual Environment (`.venv`) — Create, Activate, Clean Up
+
+You **don’t install Python inside** `.venv`; you **create** a venv **from** an installed (“base”) Python.
+The venv isolates packages while reusing the base interpreter.
+
+### Create
+```powershell
+# Create venv from Python 3.11
+py -3.11 -m venv .venv
+```
+
+### Activate
+```powershell
+# PowerShell
+.\.venv\Scripts\Activate.ps1
+# You should now see (.venv) prefix in your prompt
+```
+
+### Install deps (manual)
+> Normally the script does this for you, but these are handy if you’re doing it by hand.
+```powershell
+python -m pip install -r requirements.txt -r requirements-dev.txt
+```
+
+### Deactivate
+```powershell
+deactivate
+```
+
+### Clean up / Recreate (when switching Python versions or fixing a broken venv)
+```powershell
+Remove-Item -Recurse -Force .\.venv
+py -3.11 -m venv .venv
+```
+
+> The orchestrator will also **auto-rebuild** `.venv` if it detects that the base interpreter changed (e.g., you moved from 3.13 to 3.11).
+
+---
+
+## Typical Workflows (Windows)
+
+```powershell
+# Full cycle in foreground (recommended while developing)
+.
+./make full
+
+# Same flow, background app as a job (tail logs with 'logs')
+.
+./make full-daemon
+.
+./make logs
+.
+./make stop
+
+# Only DB + schema (fast reset)
+.
+./make schema
+
+# Run tests only (assumes deps already installed)
+.
+./make tests
+```
+
+**Troubleshooting quickies**
+
+- “Python was not found …” → disable app execution aliases; ensure `py -3.11` exists.
+- “Could not find platform independent libraries \<prefix\>” → benign Python probing; the script ignores it.
+- DB issues → ensure Docker Desktop is running; `.
+./make start-docker` / `stop-docker` can help.
+- Port busy → set `APP_PORT` in `.env` or stop the conflicting process.
+

@@ -1,15 +1,11 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal
+set SCRIPT=%~dp0run-stack.ps1
 
-set "SCRIPT=%~dp0make.ps1"
-
-rem Prefer PowerShell Core (pwsh) if available
-where pwsh >nul 2>nul
-if %errorlevel%==0 (
-  pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" %*
-  exit /b !errorlevel!
+if not exist "%SCRIPT%" (
+  echo run-stack.ps1 not found next to make.cmd
+  exit /b 1
 )
 
-rem Fallback to Windows PowerShell
-powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" %*
-exit /b %errorlevel%
+powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" %*
+exit /b %ERRORLEVEL%
