@@ -20,6 +20,7 @@ def test_register_parent_happy_path(client: TestClient):
              -> /auth/me reflects roles & active
     """
     new_phone = "09" + uuid.uuid4().hex[:10]
+    new_email = f"new.parent+{uuid.uuid4().hex[:8]}@example.com"  # ← unique per test run
 
     # 1) Verify → ACTUAL token (server creates minimal user if missing)
     r = client.post(f"{API}/auth/otp/verify", json={"phone": new_phone, "otp": FIXED_OTP})
@@ -31,11 +32,11 @@ def test_register_parent_happy_path(client: TestClient):
     claims = jwt.decode(token, options={"verify_signature": False})
     assert not claims.get("pre", False)
 
-    # 2) Register basic profile
+    # 2) Register basic profile (use unique email)
     r = client.post(
         f"{API}/users/register",
         headers=bearer(token),
-        json={"name": "New Parent User", "email": "new.parent@example.com"},
+        json={"name": "New Parent User", "email": new_email},
     )
     assert r.status_code in (200, 204), r.text
 
@@ -49,7 +50,6 @@ def test_register_parent_happy_path(client: TestClient):
                 "gender": "male",
                 "vaccine_status": "up_to_date",
                 "rewards": "Very Good Boy",
-                # picture_url optional in test
             },
             {
                 "name": "Luna",

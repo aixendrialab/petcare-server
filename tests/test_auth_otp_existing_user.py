@@ -3,7 +3,7 @@ from fastapi.testclient import TestClient
 API = "/api/v1"
 
 # Pick a phone number that you seed as an existing user
-EXISTING_USER_PHONE = "09840185469"  # Asha Rao in your seed data
+EXISTING_USER_PHONE = "+919999"  # Asha Rao in your seed data
 
 def test_otp_verify_existing_user_returns_actual_and_roles(client: TestClient):
     # 1) Verify OTP for an existing user

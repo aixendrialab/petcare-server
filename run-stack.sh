@@ -407,6 +407,7 @@ cmd_full () {
   apply_schema
   apply_seed
   INSTALL_DEPS=1 ensure_venv
+  "$PY" -m pytest -q
   run_app
 }
 

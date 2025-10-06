@@ -1,6 +1,5 @@
-# tests/conftest.py
-# tests/conftest.py
 import sys
+import tests._win_event_loop_policy
 from pathlib import Path
 
 # Project root = one level above tests/
@@ -25,7 +24,7 @@ def client():
 @pytest.fixture
 def phone() -> str:
     # use a random-ish number each run to avoid cross-test pollution in dev memory
-    return "09840185469"
+    return "+919999"
 
 @pytest.fixture
 def fixed_otp() -> str:

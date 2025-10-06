@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.db import init_pool, close_pool
 from .routers import lot_d, auth, uploads, vet,appointments_v2
+from app.routers.slot_settings import router as slot_settings_router  
 from fastapi.staticfiles import StaticFiles
 
 import json
@@ -74,4 +75,5 @@ app.include_router(uploads.router, prefix="/api/v1")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 app.include_router(vet.router, prefix="/api/v1/users/vet", tags=["vet"])
+app.include_router(slot_settings_router)                  # router already has prefix="/api/v1"
 app.include_router(appointments_v2.router, prefix="/api/v1/appointments", tags=["appointments"])
