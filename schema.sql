@@ -116,15 +116,29 @@ CREATE TABLE IF NOT EXISTS slot_settings (
 DO $$
 BEGIN
   IF NOT EXISTS (
-    SELECT 1 FROM pg_indexes WHERE indexname = 'uq_slot_settings_ctx'
+    SELECT 1
+    FROM pg_indexes
+    WHERE schemaname = 'public'
+      AND tablename  = 'slot_settings'
+      AND indexname  = 'ix_slot_settings_ctx'
   ) THEN
-    CREATE UNIQUE INDEX uq_slot_settings_ctx
-      ON slot_settings (user_id, location_id, consultation_type);
+    CREATE INDEX ix_slot_settings_ctx
+      ON public.slot_settings (user_id, location_id, consultation_type);
   END IF;
-END$$;
+END $$;
 
-CREATE INDEX IF NOT EXISTS ix_slot_settings_effective
-  ON slot_settings (effective_from, effective_to);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_indexes
+    WHERE schemaname = 'public'
+      AND tablename  = 'slot_settings'
+      AND indexname  = 'ix_slot_settings_ctx_range'
+  ) THEN
+    CREATE INDEX ix_slot_settings_ctx_range
+      ON public.slot_settings (user_id, location_id, consultation_type, effective_from, effective_to);
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS slot_overrides (
   id SERIAL PRIMARY KEY,

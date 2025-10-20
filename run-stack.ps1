@@ -16,6 +16,35 @@ function Trace-Enter {
   # no-op tracer to avoid failures when not defined elsewhere
 }
 
+function Load-DotEnv([string]$path) {
+  if (-not (Test-Path -LiteralPath $path)) { return }
+  Get-Content -LiteralPath $path | ForEach-Object {
+    $line = $_.Trim()
+    if ($line -eq '' -or $line.StartsWith('#')) { return }
+
+    $parts = $line -split '=', 2
+    if ($parts.Count -lt 2) { return }
+
+    $name  = $parts[0].Trim()
+    $value = $parts[1].Trim()
+
+    if ( ($value.StartsWith('"') -and $value.EndsWith('"')) -or
+         ($value.StartsWith("'") -and $value.EndsWith("'")) ) {
+      $value = $value.Substring(1, $value.Length - 2)
+    }
+
+    if ($name) { [Environment]::SetEnvironmentVariable($name, $value, "Process") }
+  }
+}
+
+
+#function Ensure-Default([string]$name, [string]$default) {
+#  if ([string]::IsNullOrWhiteSpace($env:$name)) {
+#    $env:$name = $default
+#  }
+#}
+
+
 function Resolve-Python311 {
     if ($env:PY_EXE -eq 'python3') {
         Write-Host " - ignoring PY_EXE=python3 (Microsoft Store alias)" -ForegroundColor Yellow
@@ -72,6 +101,14 @@ function Ensure-Venv {
 
   $VENV_PATH = _IfEmpty $env:VENV_PATH '.venv'
   $venvPy = Join-Path $VENV_PATH 'Scripts\python.exe'
+
+  # 🧠 SHORT-CIRCUIT for FAST MODE
+  if ($INSTALL_DEPS -eq 0 -and (Test-Path $VENV_PATH) -and (Test-Path $venvPy)) {
+    Write-Host " - fast mode: keeping existing venv (no rebuild or pip install)"
+    $script:PYBIN = $venvPy
+    $script:PIP   = Join-Path $VENV_PATH 'Scripts\pip.exe'
+    return
+  }
 
   $needsRebuild = $false
   if (Test-Path $VENV_PATH) {
@@ -134,6 +171,7 @@ function Ensure-Venv {
     Write-Host " - skipping pip install (fast mode)"
   }
 }
+
 
 
 function Pip {
@@ -267,7 +305,7 @@ function Ensure-Python310Plus {
   # Build/repair venv and install deps
   Ensure-Venv
 }
-function Ensure-Venv {
+function Ensure-Venv1 {
   # Resolve base 3.11 Python and rebuild venv if base changed
   $basePy = Resolve-Python311
   $VENV_PATH = _IfEmpty $env:VENV_PATH '.venv'
@@ -525,25 +563,64 @@ function Run-Tests {
 
 # ----- App run/stop/status ----------------------------------------------------
 function Load-AppEnv {
-  if (Test-Path $ENV_PATH) {
-    Get-Content $ENV_PATH | ForEach-Object {
-      if ($_ -match '^\s*#' -or $_ -match '^\s*$') { return }
-      if ($_ -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$') {
-        $k=$Matches[1]; $v=$Matches[2]
-        if ($v -match '^"(.*)"$') { $v=$Matches[1] }
-        if ($v -match "^\x27(.*)\x27$") { $v=$Matches[1] }
-        [Environment]::SetEnvironmentVariable($k,$v,'Process')
+  [CmdletBinding()]
+  param(
+    # load base first, then overrides
+    [string[]] $Paths = @(".env", ".dbstack.env"),
+    [switch]   $Quiet
+  )
+
+  foreach ($p in $Paths) {
+    if (-not (Test-Path -LiteralPath $p)) { continue }
+
+    Get-Content -LiteralPath $p | ForEach-Object {
+      $line = $_.Trim()
+      if ($line -eq '' -or $line.StartsWith('#')) { return }
+
+      # split on FIRST '=' only
+      $parts = $line -split '=', 2
+      if ($parts.Count -lt 2) { return }
+
+      $name  = $parts[0].Trim()
+      $value = $parts[1].Trim()
+
+      # strip "..." or '...'
+      if ( ($value.StartsWith('"') -and $value.EndsWith('"')) -or
+           ($value.StartsWith("'") -and $value.EndsWith("'")) ) {
+        $value = $value.Substring(1, $value.Length - 2)
+      }
+
+      if ($name) {
+        [Environment]::SetEnvironmentVariable($name, $value, "Process")
+        if (-not $Quiet) { Write-Verbose "ENV: $name=$value (from $p)" }
       }
     }
   }
 }
+
+
+
+
+
 function Run-App {
   param([switch]$Daemon = $false)
-  Load-AppEnv
+
+  # Load env files into *process* env
+  Load-AppEnv   # reads .env then .dbstack.env
+
+  # Bridge env -> script/local vars *if present* (no defaults here)
+  $envHost   = [Environment]::GetEnvironmentVariable("APP_HOST",   "Process")
+  $envPort   = [Environment]::GetEnvironmentVariable("PORT",       "Process")
+  $envImport = [Environment]::GetEnvironmentVariable("APP_IMPORT", "Process")
+
+  if ($envHost)   { $script:APP_HOST   = $envHost }
+  if ($envPort)   { $script:PORT       = $envPort }
+  if ($envImport) { $script:APP_IMPORT = $envImport }  # e.g. "app.main:app"
 
   # assume venv is already prepared in STEP 4/5
-  if (-not $script:PYBIN -or -not (Test-Path $script:PYBIN)) { Fail \"venv not ready; run Ensure-Venv first\" }
-
+  if (-not $script:PYBIN -or -not (Test-Path $script:PYBIN)) {
+    Fail "venv not ready; run Ensure-Venv first"
+  }
 
   $UVI = Join-Path $VENV_PATH 'Scripts\uvicorn.exe'
   if (-not (Test-Path $UVI)) {
@@ -553,24 +630,46 @@ function Run-App {
 
   $LOG = Join-Path $RUN_DIR 'uvicorn.out'
   $ERR = Join-Path $RUN_DIR 'uvicorn.err'
-  $appStr = $APP_IMPORT
+  $appStr = $APP_IMPORT  # e.g., "app.main:app"
+
+  # Build args *conditionally* so uvicorn’s own defaults apply when unset
+  $uvArgs = @()
+  if ($APP_HOST) { $uvArgs += "--host=$APP_HOST" }
+  if ($PORT)     { $uvArgs += "--port=$PORT"     }
+  $uvArgs += $appStr
+
+  # For the message only (purely cosmetic)
+  $displayHost = if ($APP_HOST) { $APP_HOST } else { "127.0.0.1" }
+  $displayPort = if ($PORT)     { $PORT }     else { "8000" }
+
+  if ($Command -eq "fast") {
+    $uvArgs += "--reload"
+  }
+
   if ($Daemon) {
-    Write-Host (" - starting app (daemon) on http://{0}:{1}" -f $APP_HOST, $PORT)
+    Write-Host (" - starting app (daemon) on http://{0}:{1}" -f $displayHost, $displayPort)
     Start-Job -Name 'app-job' -ScriptBlock {
-      param($UVI,$appStr,$APP_HOST,$PORT,$LOG,$ERR)
-      & $UVI "--host=$APP_HOST" "--port=$PORT" $appStr 1>$LOG 2>$ERR
-    } -ArgumentList $UVI,$appStr,$APP_HOST,$PORT,$LOG,$ERR | Out-Null
+      param($UVI,$argsArray,$LOG,$ERR)
+      & $UVI @argsArray 1>$LOG 2>$ERR
+    } -ArgumentList $UVI,$uvArgs,$LOG,$ERR | Out-Null
     Write-Host " - app started (job: app-job)"
   } else {
-    Write-Host (" - starting app (foreground) on http://{0}:{1}" -f $APP_HOST, $PORT)
-    & $UVI "--host=$APP_HOST" "--port=$PORT" $appStr
+    Write-Host (" - starting app (foreground) on http://{0}:{1}" -f $displayHost, $displayPort)
+    & $UVI @uvArgs
   }
 }
+
+
+
+
+
 function Show-Status {
   $job = Get-Job -Name 'app-job' -ErrorAction SilentlyContinue
   if ($job -and $job.State -eq 'Running') { Write-Host "App job is running." }
   else { Write-Host "App job is not running." }
 }
+
+
 function Stop-App {
   $job = Get-Job -Name 'app-job' -ErrorAction SilentlyContinue
   if ($job) { Stop-Job -Job $job | Out-Null; Remove-Job -Job $job | Out-Null; Write-Host "Stopped."; return }
@@ -637,7 +736,7 @@ Commands:
   ui-stop         - stop Expo web job
 "@ | Write-Host; break }
 
-  'fast'         { Write-Host "MODE: fast";   Ensure-Db; Ensure-Venv; $INSTALL_DEPS=0; Run-App }
+  'fast'         { Write-Host "MODE: fast";   $INSTALL_DEPS=0; Ensure-Db; Ensure-Venv; Run-App }
   'full'         { Write-Host "MODE: full";   Ensure-Db; Apply-Schema; Apply-Seed; Ensure-Venv; Run-Tests; $INSTALL_DEPS=0; Run-App }
   'schema'       { Ensure-Db; Apply-Schema }
   'schema_seed'  { Ensure-Db; Apply-Schema; Apply-Seed }

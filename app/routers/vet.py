@@ -20,6 +20,7 @@ from app.api.models.prescriptions import Prescription, PrescriptionItem
 from app.utils.invoice import compute_totals
 from app.dependencies import get_db
 from psycopg.rows import dict_row
+from datetime import datetime, date, time, timedelta
 
 router = APIRouter(dependencies=[Depends(current_user_id)])
 
@@ -153,141 +154,72 @@ async def upsert_profile(body: VetProfileIn, uid: int = Depends(current_user_id)
     prof = _normalize_profile_row(prof)
     return {"profile": prof, "locations": locs}
 
+from psycopg.rows import dict_row
+
 @router.get("/locations")
 async def list_locations(uid: int = Depends(current_user_id)):
-    async with get_conn() as conn, conn.cursor() as cur:
+    print ("in locations")
+    async with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT * FROM vet_locations WHERE user_id=%s ORDER BY is_primary DESC, id",
+            "SELECT id, name FROM vet_locations WHERE user_id=%s "
+            "ORDER BY is_primary DESC, id",
             (uid,),
         )
-        rows = await cur.fetchall()
+        rows = await cur.fetchall()  # -> list[dict] like [{"id":1,"name":"..."}]
     return rows
 
 @router.get("/{vet_id}/queue")
-def queue(vet_id: int, db: Session = Depends(get_db)) -> Dict[str, Any]:
-    start = func.date_trunc('day', func.now()); end = start + func.interval('1 day')
-    rows = (db.query(Appointment)
-              .filter(Appointment.vet_id==vet_id, Appointment.start_ts>=start, Appointment.start_ts<end,
-                      Appointment.calendar_state=='CONFIRMED')
-              .order_by(Appointment.start_ts.asc()).all())
-    groups = {"booked": [], "arrived": [], "in_consultation": [], "completed": []}
-    for a in rows:
-        groups["arrived" if a.visit_state=="ARRIVED" else
-               "in_consultation" if a.visit_state=="IN_CONSULTATION" else
-               "completed" if a.visit_state=="CONSULTATION_COMPLETE" else
-               "booked"].append(a.id)
-    return {"vet_id": vet_id, "groups": groups}
+def queue(vet_id: int) -> Dict[str, Any]:
+    """
+    STUB: queue is not wired yet (appointments table not present).
+    Return an empty, but correctly shaped, response.
+    """
+    return {
+        "vet_id": vet_id,
+        "groups": {
+            "booked": [],
+            "arrived": [],
+            "in_consultation": [],
+            "completed": [],
+        },
+    }
 
 @router.post("/{vet_id}/appointments/{appointment_id}/checkin")
-def checkin(vet_id: int, appointment_id: int, db: Session = Depends(get_db)):
-    a = db.get(Appointment, appointment_id)
-    if not a or a.vet_id != vet_id: raise HTTPException(status_code=404, detail="appointment not found")
-    a.visit_state = "ARRIVED"
-    db.add(AppointmentAudit(appointment_id=a.id, actor_kind="vet", action="checkin", details_json={}))
-    db.commit(); return {"id": a.id, "visit_state": a.visit_state}
+def checkin(vet_id: int, appointment_id: int):
+    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                        detail="Check-in is not implemented yet")
 
 @router.post("/{vet_id}/appointments/{appointment_id}/start")
-def start(vet_id: int, appointment_id: int, db: Session = Depends(get_db)):
-    a = db.get(Appointment, appointment_id)
-    if not a or a.vet_id != vet_id: raise HTTPException(status_code=404, detail="appointment not found")
-    a.visit_state = "IN_CONSULTATION"
-    db.add(AppointmentAudit(appointment_id=a.id, actor_kind="vet", action="start_consult", details_json={}))
-    db.commit(); return {"id": a.id, "visit_state": a.visit_state}
+def start(vet_id: int, appointment_id: int):
+    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                        detail="Start consultation is not implemented yet")
 
 @router.post("/{vet_id}/appointments/{appointment_id}/complete")
-def complete(vet_id: int, appointment_id: int, db: Session = Depends(get_db)):
-    a = db.get(Appointment, appointment_id)
-    if not a or a.vet_id != vet_id: raise HTTPException(status_code=404, detail="appointment not found")
-    a.visit_state = "CONSULTATION_COMPLETE"
-    db.add(AppointmentAudit(appointment_id=a.id, actor_kind="vet", action="complete_consult", details_json={}))
-    db.commit(); return {"id": a.id, "visit_state": a.visit_state}
+def complete(vet_id: int, appointment_id: int):
+    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                        detail="Complete consultation is not implemented yet")
 
 @router.post("/{vet_id}/appointments/{appointment_id}/cancel")
-def cancel(vet_id: int, appointment_id: int, db: Session = Depends(get_db)):
-    a = db.get(Appointment, appointment_id)
-    if not a or a.vet_id != vet_id: raise HTTPException(status_code=404, detail="appointment not found")
-    a.calendar_state = "CANCELLED_BY_VET"
-    if a.slot_id: 
-        s = db.get(Slot, a.slot_id); 
-        if s: s.status = "OPEN"
-    db.add(AppointmentAudit(appointment_id=a.id, actor_kind="vet", action="cancel", details_json={}))
-    db.commit(); return {"id": a.id, "calendar_state": a.calendar_state}
+def cancel(vet_id: int, appointment_id: int):
+    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                        detail="Cancel appointment is not implemented yet")
 
 @router.post("/{vet_id}/appointments/{appointment_id}/mark-no-show")
-def no_show(vet_id: int, appointment_id: int, db: Session = Depends(get_db)):
-    a = db.get(Appointment, appointment_id)
-    if not a or a.vet_id != vet_id: raise HTTPException(status_code=404, detail="appointment not found")
-    a.calendar_state = "CANCELLED_BY_VET"
-    if a.slot_id: 
-        s = db.get(Slot, a.slot_id); 
-        if s: s.status = "OPEN"
-    db.add(AppointmentAudit(appointment_id=a.id, actor_kind="vet", action="no_show", details_json={}))
-    db.commit(); return {"id": a.id, "calendar_state": a.calendar_state}
+def no_show(vet_id: int, appointment_id: int):
+    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                        detail="Mark no-show is not implemented yet")
 
 @router.post("/{vet_id}/appointments/{appointment_id}/reschedule")
-def vet_reschedule(vet_id: int, appointment_id: int, new_slot_id: int, db: Session = Depends(get_db)):
-    a = db.get(Appointment, appointment_id)
-    if not a or a.vet_id != vet_id: raise HTTPException(status_code=404, detail="appointment not found")
-    ns = db.get(Slot, new_slot_id)
-    if not ns or ns.status != "OPEN": raise HTTPException(status_code=409, detail="new slot not available")
-    if a.slot_id:
-        os = db.get(Slot, a.slot_id); 
-        if os: os.status = "OPEN"
-    ns.status = "BOOKED"
-    a.slot_id, a.start_ts, a.end_ts, a.mode, a.calendar_state = ns.id, ns.start_ts, ns.end_ts, ns.mode, "CONFIRMED"
-    db.add(AppointmentAudit(appointment_id=a.id, actor_kind="vet", action="reschedule", details_json={"slot_id": new_slot_id}))
-    db.commit(); return {"id": a.id, "calendar_state": a.calendar_state}
-
-@router.get("/{vet_id}/propose-reschedules")
-def propose_reschedules(vet_id: int, location_id: int, mode: str = "in_person", limit: int = 5, db: Session = Depends(get_db)):
-    rows = (db.query(Slot).filter(Slot.vet_id==vet_id, Slot.location_id==location_id, Slot.mode==mode, 
-                                  Slot.status=="OPEN", Slot.start_ts>=func.now())
-                      .order_by(Slot.start_ts.asc()).limit(limit).all())
-    return [{"slot_id": s.id, "start_ts": s.start_ts, "end_ts": s.end_ts} for s in rows]
+def vet_reschedule(vet_id: int, appointment_id: int, new_slot_id: int):
+    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                        detail="Reschedule is not implemented yet")
 
 @router.put("/{vet_id}/appointments/{appointment_id}/prescription")
-def save_rx(vet_id: int, appointment_id: int, payload: Dict[str, Any], db: Session = Depends(get_db)):
-    a = db.get(Appointment, appointment_id)
-    if not a or a.vet_id != vet_id: raise HTTPException(status_code=404, detail="appointment not found")
-    rx = db.query(Prescription).filter(Prescription.appointment_id==appointment_id).one_or_none()
-    if not rx:
-        rx = Prescription(appointment_id=appointment_id); db.add(rx); db.flush()
-    rx.diagnosis = payload.get("diagnosis"); rx.notes = payload.get("notes")
-    db.query(PrescriptionItem).filter(PrescriptionItem.prescription_id==rx.id).delete()
-    for it in payload.get("items", []):
-        db.add(PrescriptionItem(prescription_id=rx.id, drug_name=it["drug_name"],
-                                dose=it.get("dose"), frequency=it.get("frequency"), before_after_food=it.get("before_after_food")))
-    db.add(AppointmentAudit(appointment_id=a.id, actor_kind="vet", action="save_prescription", details_json={}))
-    db.commit(); return {"appointment_id": appointment_id, "diagnosis": rx.diagnosis, "items": len(payload.get("items", []))}
+def save_rx(vet_id: int, appointment_id: int, payload: Dict[str, Any]):
+    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                        detail="Prescription flow is not implemented yet")
 
 @router.post("/{vet_id}/appointments/{appointment_id}/invoice")
-def build_invoice(vet_id: int, appointment_id: int, payload: Dict[str, Any], db: Session = Depends(get_db)):
-    a = db.get(Appointment, appointment_id)
-    if not a or a.vet_id != vet_id: raise HTTPException(status_code=404, detail="appointment not found")
-    inv = db.query(Invoice).filter(Invoice.appointment_id==appointment_id).one_or_none()
-    if inv: raise HTTPException(status_code=409, detail="invoice already exists")
-    clinic = db.execute(text("SELECT vp.legal_name, COALESCE(vl.line1,'')||E'\n'||COALESCE(vl.line2,'')||E'\n'||COALESCE(vl.city,'') AS addr, vp.gstin FROM vet_profiles vp JOIN vet_locations vl ON vl.id=:loc AND vp.user_id=:vet"),
-                        {"loc": a.location_id, "vet": a.vet_id}).first()
-    legal, addr, gstin = (clinic[0] if clinic else "Clinic", clinic[1] if clinic else "Address", clinic[2] if clinic else None)
-    last = db.execute(text("SELECT COALESCE(MAX(id),0) FROM invoices")).scalar() or 0
-    number = f"INV-{a.location_id}-{str(last+1).zfill(4)}"
-    inv = Invoice(appointment_id=appointment_id, vet_id=a.vet_id, location_id=a.location_id,
-                  invoice_no=number, bill_to_parent_id=a.parent_id, clinic_legal_name=legal,
-                  clinic_address=addr, gstin=gstin)
-    db.add(inv); db.flush()
-    for it in payload.get("items", []):
-        qty = Decimal(str(it.get("qty",1))); unit = Decimal(str(it.get("unit_price",0)))
-        db.add(InvoiceItem(invoice_id=inv.id, description=it["description"], qty=qty, unit_price=unit, amount=qty*unit, tax_rate=Decimal(str(it.get("tax_rate", 0.18)))))
-    rows = db.execute(text("SELECT qty, unit_price, tax_rate FROM invoice_items WHERE invoice_id=:iid"), {"iid": inv.id}).fetchall()
-    items = [{"qty": float(r[0]), "unit_price": float(r[1]), "tax_rate": float(r[2])} for r in rows]
-    subtotal, cgst, sgst, igst, total = compute_totals(items, intra_state=True)
-    inv.subtotal, inv.tax_cgst, inv.tax_sgst, inv.tax_igst, inv.total, inv.status = subtotal, cgst, sgst, igst, total, "paid"
-    db.add(AppointmentAudit(appointment_id=a.id, actor_kind="vet", action="build_invoice", details_json={"invoice_id": inv.id}))
-    db.commit(); return {"invoice_id": inv.id, "invoice_no": inv.invoice_no, "total": str(inv.total)}
-
-@router.get("/{vet_id}/appointments/{appointment_id}/invoice.pdf")
-def invoice_pdf(vet_id: int, appointment_id: int, db: Session = Depends(get_db)):
-    inv = db.query(Invoice).filter(Invoice.appointment_id==appointment_id).one_or_none()
-    if not inv: raise HTTPException(status_code=404, detail="invoice not found")
-    pdf = b"%PDF-1.4\n% Simple one-line PDF\n%%EOF"
-    return StreamingResponse(iter([pdf]), media_type="application/pdf")
+def build_invoice(vet_id: int, appointment_id: int, payload: Dict[str, Any]):
+    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                        detail="Invoice flow is not implemented yet")

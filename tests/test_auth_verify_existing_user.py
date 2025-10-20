@@ -3,6 +3,8 @@ from typing import Optional
 from fastapi.testclient import TestClient
 import os
 
+from tests.helpers.seed_data import seed_phone
+
 API = "/api/v1"
 
 def _seed_phone() -> str:
@@ -28,7 +30,7 @@ def _extract_test_otp(resp_json: dict) -> Optional[str]:
 def test_verify_existing_user_returns_actual_token_and_roles(client, fixed_otp):
     """Existing user -> type=actual, token present, roles is a non-empty list containing expected roles."""
     API = "/api/v1"
-    phone = "+919999"  # Asha from seed (has role 'parent')
+    phone = seed_phone()  # Asha from seed (has role 'parent')
 
     # Request OTP (your backend creates/ensures placeholder, OK to call for an existing phone)
     r = client.post(f"{API}/auth/otp/request", json={"phone": phone})

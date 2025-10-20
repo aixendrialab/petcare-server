@@ -5,7 +5,7 @@ from psycopg_pool import AsyncConnectionPool
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://user:pass@localhost:5432/petdb"  # safe default for dev
+    "postgresql://user:pass@localhost:5432/petdb"
 )
 
 pool: AsyncConnectionPool | None = None
@@ -13,13 +13,17 @@ pool: AsyncConnectionPool | None = None
 async def init_pool():
     global pool
     if pool is None:
-        # tune as needed
+        # Pass timezone at connection level (works for every conn in the pool)
         pool = AsyncConnectionPool(
             conninfo=DATABASE_URL,
             min_size=1,
             max_size=10,
             open=False,
-            kwargs={"autocommit": True},  # simple dev setup
+            kwargs={
+                "autocommit": True,
+                # Force UTC on each connection from the moment it’s established
+                "options": "-c timezone=UTC",
+            },
         )
         await pool.open()
 
@@ -38,5 +42,8 @@ async def get_conn():
     """
     if pool is None:
         await init_pool()
+
     async with pool.connection() as conn:
+        # Double-safety: enforce UTC even if options were bypassed (e.g., in some envs)
+        await conn.execute("SET TIME ZONE 'UTC'")
         yield conn
