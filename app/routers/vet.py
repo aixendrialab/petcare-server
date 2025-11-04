@@ -36,19 +36,28 @@ def _normalize_profile_row(row):
 
 @router.get("/profile")
 async def get_profile(uid: int = Depends(current_user_id)):
-    # return { profile: {...}, locations: [...] } with dict rows
     async with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute("SELECT * FROM vet_profiles WHERE user_id = %s", (uid,))
+        await cur.execute("""
+            SELECT u.id AS user_id, u.name, u.email, 
+                   vp.legal_name, vp.display_name, vp.business_email, vp.billing_email,
+                   vp.billing_address, vp.gstin, vp.pan, vp.qualifications, vp.license_no,
+                   vp.experience_years, vp.specialties, vp.visit_in_clinic, vp.visit_video,
+                   vp.fee_in_clinic, vp.fee_video, vp.slot_minutes
+            FROM users u
+            LEFT JOIN vet_profiles vp ON vp.user_id = u.id
+            WHERE u.id = %s
+        """, (uid,))
         prof = await cur.fetchone()
+
         await cur.execute(
             "SELECT * FROM vet_locations WHERE user_id = %s ORDER BY is_primary DESC, id",
-            (uid,),
+            (uid,)
         )
         locs = await cur.fetchall()
 
     prof = _normalize_profile_row(prof)
-    # locs are already list[dict] due to dict_row
     return {"profile": prof, "locations": locs}
+
 
 @router.put("/register", status_code=status.HTTP_200_OK)
 async def upsert_profile(body: VetProfileIn, uid: int = Depends(current_user_id)):

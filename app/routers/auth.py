@@ -100,7 +100,6 @@ def otp_request(req: OTPReq):
 async def otp_verify(req: OTPVerify):
     if req.otp != FIXED_OTP:
         raise HTTPException(status_code=400, detail="Invalid OTP")
-
     phone = (req.phone or "").strip()
 
     async with get_conn() as conn, conn.cursor() as cur:

@@ -1265,24 +1265,20 @@ def preview_slots_for_day(
     user=Depends(require_user),
 ):
     """
-    Returns all timeline segments in chronological order (no merge, no normalize).
-    Each window (open/break/blocked) is directly emitted, and gaps are auto-filled.
+    Final deterministic algorithm:
+    1️⃣ Build base segments from slot settings (A/G/I/B)
+    2️⃣ Apply overrides (available, break, blocked)
+    3️⃣ Merge adjacent same-status segments
     """
+
     ctx_user_id = int(user["id"])
     day = _parse_date_or_400(date_str)
-
-    # 1️⃣ Load slot setting and overrides
     setting = _resolve_setting_or_404(db, ctx_user_id, location_id, consultation_type, day)
     ovp = _load_override_payload(db, setting.id, day)
+    week_rules = setting.week_rules or {}
+    weekday = day.strftime("%a").lower()[:3]
 
-    print(f"[DEBUG] Override payload: {ovp}")
-
-    # 2️⃣ Collect all windows (open, break, block)
-    open_windows = ovp.get("open_windows", [])
-    break_windows = ovp.get("break_windows", [])
-    block_windows = ovp.get("block_windows", [])
-
-    # Helper conversions
+    # -------------------------------------------------------
     def to_min(hhmm: str) -> int:
         h, m = map(int, hhmm.split(":"))
         return h * 60 + m
@@ -1290,76 +1286,117 @@ def preview_slots_for_day(
     def to_hhmm(m: int) -> str:
         return f"{m // 60:02d}:{m % 60:02d}"
 
-    # 3️⃣ Build unified window list
-    all_windows = []
-    for w in open_windows:
-        all_windows.append({**w, "status": "available"})
-    for w in break_windows:
-        all_windows.append({**w, "status": "break"})
-    for w in block_windows:
-        all_windows.append({**w, "status": "blocked"})
+    def add_segment(segs, start, end, status):
+        if to_min(end) > to_min(start):
+            segs.append({"start": start, "end": end, "status": status})
 
-    # If no overrides found, fall back to computed working windows
-    if not all_windows:
-        print("[DEBUG] No overrides found, computing baseline open windows.")
-        working_windows = _compute_open_windows(setting, ovp, day)
-        if not working_windows:
-            return {"setting": {"id": setting.id}, "segments": []}
-        for w in working_windows:
-            all_windows.append({**w, "status": "available"})
-
-    # Sort chronologically
-    all_windows.sort(key=lambda w: to_min(w["start"]))
-
-    print(f"[DEBUG] Total windows (including overrides): {len(all_windows)}")
-    for w in all_windows:
-        print(f"   {w['start']} - {w['end']} [{w['status']}]")
-
-    # 4️⃣ Walk all windows and fill gaps
+    # -------------------------------------------------------
+    # 1️⃣ Base segments from week rules
+    day_rules = week_rules.get(weekday, [])
     segments = []
-    for i, w in enumerate(all_windows):
-        segments.append({
-            "start": w["start"],
-            "end": w["end"],
-            "status": w["status"]
-        })
-        # Insert a gap if next window starts later
-        if i < len(all_windows) - 1:
-            cur_end = to_min(w["end"])
-            next_start = to_min(all_windows[i + 1]["start"])
-            if next_start > cur_end:
-                segments.append({
-                    "start": to_hhmm(cur_end),
-                    "end": to_hhmm(next_start),
-                    "status": "gap"
-                })
-                print(f"[DEBUG] Added gap: {to_hhmm(cur_end)} - {to_hhmm(next_start)}")
+    for rule in day_rules:
+        s, e = to_min(rule["start"]), to_min(rule["end"])
+        cur = s
+        breaks = rule.get("breaks", [])
 
-    print(f"\n[DEBUG] Total segments generated: {len(segments)}")
-    for s in segments:
-        print(f"   {s['start']} - {s['end']} [{s['status']}]")
+        breaks.sort(key=lambda b: to_min(b["start"]))
+        for b in breaks:
+            bs, be = to_min(b["start"]), to_min(b["end"])
+            if bs > cur:
+                add_segment(segments, to_hhmm(cur), to_hhmm(bs), "available")
+            add_segment(segments, b["start"], b["end"], "break")
+            cur = be
+        if cur < e:
+            add_segment(segments, to_hhmm(cur), to_hhmm(e), "available")
 
-    # 5️⃣ Return plain sequential output
+    # -------------------------------------------------------
+    # 2️⃣ Insert intra-slot gaps (slot_minutes + gap_minutes)
+    with_gaps = []
+    for seg in segments:
+        if seg["status"] == "available" and setting.gap_minutes > 0:
+            s, e = to_min(seg["start"]), to_min(seg["end"])
+            sm = s
+            while sm + setting.slot_minutes <= e:
+                se = sm + setting.slot_minutes
+                add_segment(with_gaps, to_hhmm(sm), to_hhmm(se), "available")
+                sm = se
+                if sm + setting.gap_minutes <= e:
+                    add_segment(with_gaps, to_hhmm(sm), to_hhmm(sm + setting.gap_minutes), "gap")
+                    sm += setting.gap_minutes
+            if sm < e:
+                add_segment(with_gaps, to_hhmm(sm), to_hhmm(e), "idle")
+        else:
+            with_gaps.append(seg)
+
+    # -------------------------------------------------------
+    # 3️⃣ Apply overrides (open_windows, break_windows, block_windows)
+    def apply_overrides(base, overrides, override_status):
+        result = []
+        for seg in base:
+            s1, e1 = to_min(seg["start"]), to_min(seg["end"])
+            overlapped = False
+            for o in overrides:
+                s2, e2 = to_min(o["start"]), to_min(o["end"])
+                if e2 <= s1 or s2 >= e1:
+                    continue
+                overlapped = True
+                if s2 > s1:
+                    add_segment(result, to_hhmm(s1), to_hhmm(s2), seg["status"])
+                add_segment(result, to_hhmm(max(s1, s2)), to_hhmm(min(e1, e2)), override_status)
+                if e2 < e1:
+                    add_segment(result, to_hhmm(e2), to_hhmm(e1), seg["status"])
+            if not overlapped:
+                result.append(seg)
+
+        if base:
+            base_start, base_end = to_min(base[0]["start"]), to_min(base[-1]["end"])
+        else:
+            base_start, base_end = None, None
+
+        for o in overrides:
+            s2, e2 = to_min(o["start"]), to_min(o["end"])
+            if base_start is None or e2 > base_end or s2 < base_start:
+                add_segment(result, o["start"], o["end"], override_status)
+
+        return result
+
+    base = with_gaps
+    base = apply_overrides(base, ovp.get("open_windows", []), "available")
+    base = apply_overrides(base, ovp.get("break_windows", []), "break")
+    base = apply_overrides(base, ovp.get("block_windows", []), "blocked")
+
+    # -------------------------------------------------------
+    # 4️⃣ Merge adjacent same-status
+    base.sort(key=lambda s: to_min(s["start"]))
+    merged = []
+    for seg in base:
+        if merged and merged[-1]["status"] == seg["status"] and merged[-1]["end"] == seg["start"]:
+            merged[-1]["end"] = seg["end"]
+        else:
+            merged.append(seg)
+
+    print(f"[DEBUG] Final Segments ({len(merged)}):")
+    for s in merged:
+        print(f"  {s['start']}–{s['end']}  [{s['status']}]")
+
     return {
         "setting": {
             "id": setting.id,
             "slot_minutes": setting.slot_minutes,
             "gap_minutes": setting.gap_minutes,
-            "per_slot_capacity": setting.per_slot_capacity,
-            "lead_time_minutes": setting.lead_time_minutes,
-            "booking_window_days": setting.booking_window_days,
         },
-        "segments": segments,
+        "segments": merged,
     }
 
 @router.post("/slot-settings/update-status")
 def update_slot_status(payload: UpdateSlotStatusPayload, db: Session = Depends(get_db)):
     """
     Update the status of a specific time range within a day's overrides.
+
     Rules:
       • 'blocked'  → add to block_windows
       • 'break'    → add to break_windows
-      • 'available'/'working' → remove any overlaps from block/break windows
+      • 'available' → add to open_windows and remove overlaps from block/break
     """
     st, en = _parse_hhmm(payload.start), _parse_hhmm(payload.end)
     if en <= st:
@@ -1387,10 +1424,16 @@ def update_slot_status(payload: UpdateSlotStatusPayload, db: Session = Depends(g
                 out.append(r)
         return out
 
+    # --------------------------------------------
     if payload.status in ("available", "working"):
-        # remove from both block and break lists
+        # remove overlaps from other categories
         merged_payload["block_windows"] = _clean_overlap(merged_payload.get("block_windows", []))
         merged_payload["break_windows"] = _clean_overlap(merged_payload.get("break_windows", []))
+
+        # add/merge into open_windows
+        merged_payload.setdefault("open_windows", [])
+        merged_payload["open_windows"] = _clean_overlap(merged_payload["open_windows"])
+        merged_payload["open_windows"].append({"start": payload.start, "end": payload.end})
 
     elif payload.status == "blocked":
         merged_payload.setdefault("block_windows", [])
@@ -1402,8 +1445,9 @@ def update_slot_status(payload: UpdateSlotStatusPayload, db: Session = Depends(g
         merged_payload["break_windows"] = _clean_overlap(merged_payload["break_windows"])
         merged_payload["break_windows"].append({"start": payload.start, "end": payload.end})
 
-    # ensure valid shape
-    for key in ("block_windows", "break_windows"):
+    # --------------------------------------------
+    # Ensure sorted, clean structure
+    for key in ("open_windows", "block_windows", "break_windows"):
         lst = merged_payload.get(key)
         if lst:
             merged_payload[key] = sorted(lst, key=lambda x: x["start"])
@@ -1420,6 +1464,8 @@ def update_slot_status(payload: UpdateSlotStatusPayload, db: Session = Depends(g
 
     db.commit()
     db.refresh(ov)
+
+    print(f"[DEBUG] Updated override {ov.id}: {merged_payload}")
     return {"ok": True, "id": ov.id, "payload": merged_payload}
 
 @router.post("/slot-settings/split-window")
@@ -1774,3 +1820,95 @@ def extend_window(payload: dict, db: Session = Depends(get_db)):
     ov.payload = dict(data)
     db.commit()
     return {"ok": True, "payload": data}
+
+@router.get("/slot-settings/{setting_id}/export", tags=["slot-settings"])
+def export_slot_setting(
+    setting_id: int,
+    include_overrides: bool = Query(False, description="Include all overrides for this setting"),
+    db: Session = Depends(get_db),
+    user = Depends(require_user),
+):
+    """Return the exact JSON saved for a specific SlotSetting id (incl. week_rules & blackout_dates)."""
+    obj = db.get(SlotSetting, setting_id)
+    if not obj:
+        raise HTTPException(404, "SlotSetting not found")
+    # ownership check
+    if int(user["id"]) != obj.user_id:
+        raise HTTPException(403, "Not your slot setting")
+
+    out = {
+        "id": obj.id,
+        "user_id": obj.user_id,
+        "location_id": obj.location_id,
+        "consultation_type": obj.consultation_type,
+        "slot_minutes": obj.slot_minutes,
+        "gap_minutes": obj.gap_minutes,
+        "per_slot_capacity": obj.per_slot_capacity,
+        "lead_time_minutes": obj.lead_time_minutes,
+        "booking_window_days": obj.booking_window_days,
+        "visible_to_parents": obj.visible_to_parents,
+        "effective_from": obj.effective_from.isoformat() if obj.effective_from else None,
+        "effective_to": obj.effective_to.isoformat() if obj.effective_to else None,
+        # 👇 exact JSON as persisted (multiple breaks preserved)
+        "week_rules": obj.week_rules or {},
+        "blackout_dates": obj.blackout_dates or [],
+    }
+
+    if include_overrides:
+        ovs = (
+            db.query(SlotOverride)
+              .filter(SlotOverride.slot_setting_id == setting_id)
+              .order_by(SlotOverride.date.asc())
+              .all()
+        )
+        out["overrides"] = [
+            {"date": o.date.isoformat(), "payload": o.payload or {}}
+            for o in ovs
+        ]
+
+    return out
+
+
+@router.get("/slot-settings/{setting_id}/overrides", tags=["slot-settings"])
+def list_overrides_for_setting(
+    setting_id: int,
+    db: Session = Depends(get_db),
+    user = Depends(require_user),
+):
+    """List all overrides (date + payload) for a SlotSetting id."""
+    obj = db.get(SlotSetting, setting_id)
+    if not obj:
+        raise HTTPException(404, "SlotSetting not found")
+    if int(user["id"]) != obj.user_id:
+        raise HTTPException(403, "Not your slot setting")
+
+    ovs = (
+        db.query(SlotOverride)
+          .filter(SlotOverride.slot_setting_id == setting_id)
+          .order_by(SlotOverride.date.asc())
+          .all()
+    )
+    return [{"date": o.date.isoformat(), "payload": o.payload or {}} for o in ovs]
+
+
+@router.get("/slot-settings/{setting_id}/overrides/{date}", tags=["slot-settings"])
+def get_override_for_date(
+    setting_id: int,
+    date: str,  # YYYY-MM-DD
+    db: Session = Depends(get_db),
+    user = Depends(require_user),
+):
+    """Get a single day's override payload for this setting id."""
+    obj = db.get(SlotSetting, setting_id)
+    if not obj:
+        raise HTTPException(404, "SlotSetting not found")
+    if int(user["id"]) != obj.user_id:
+        raise HTTPException(403, "Not your slot setting")
+
+    day = _parse_date_or_400(date)
+    ov = (
+        db.query(SlotOverride)
+          .filter(SlotOverride.slot_setting_id == setting_id, SlotOverride.date == day)
+          .first()
+    )
+    return {"date": day.isoformat(), "payload": (ov.payload if ov else {}) or {}}
