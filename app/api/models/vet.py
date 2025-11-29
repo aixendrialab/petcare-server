@@ -11,11 +11,13 @@ class VetLocationIn(BaseModel):
     hours: Optional[str] = None
     is_primary: Optional[bool] = False
 
-class VetProfileIn(BaseModel):
-    # NEW: optional account fields to upsert users table
-    name: Optional[str] = Field(default=None)
-    email: Optional[str] = Field(default=None)
 
+class VetProfileIn(BaseModel):
+    # Account
+    name: Optional[str] = None
+    email: Optional[str] = None
+
+    # Business
     legal_name: Optional[str] = None
     display_name: Optional[str] = None
     business_email: Optional[str] = None
@@ -23,13 +25,21 @@ class VetProfileIn(BaseModel):
     billing_address: Optional[str] = None
     gstin: Optional[str] = None
     pan: Optional[str] = None
+
+    # Professional
     qualifications: Optional[str] = None
     license_no: Optional[str] = None
-    experience_years: Optional[int] = 0
-    specialties: List[str] = []
-    visit_in_clinic: bool = True
-    visit_video: bool = True
-    fee_in_clinic: Optional[int] = 0
-    fee_video: Optional[int] = 0
-    slot_minutes: int = 15
-    locations: List[VetLocationIn] = []
+    experience_years: Optional[int] = None
+
+    # Specialties (SAFE default)
+    specialties: Optional[List[str]] = Field(default=None)
+
+    # Consultation settings (all optional)
+    visit_in_clinic: Optional[bool] = None
+    visit_video: Optional[bool] = None
+    fee_in_clinic: Optional[int] = None
+    fee_video: Optional[int] = None
+    slot_minutes: Optional[int] = None
+
+    # Locations (SAFE default)
+    locations: Optional[List[VetLocationIn]] = Field(default=None)
