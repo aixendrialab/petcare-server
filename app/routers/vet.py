@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from http.client import HTTPException
 import json
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Query, status
 from app.core.db import get_conn
 from .security import current_user_id
 from app.api.models.vet import VetProfileIn
@@ -24,6 +24,90 @@ from datetime import datetime, date, time, timedelta
 
 router = APIRouter(dependencies=[Depends(current_user_id)])
 
+def _to_dict(row):
+    if row is None:
+        return None
+    return dict(row) if not isinstance(row, dict) else row
+
+@router.get("/clinics/nearby")
+def list_nearby_clinics(
+    lat: float = Query(...),
+    lng: float = Query(...),
+    limit: int = 20,
+    db: Session = Depends(get_db),
+):
+    """
+    Returns each vet clinic as its own row.
+    Parent selects a clinic (location_id), not a vet.
+    """
+    rows = db.execute(text("""
+        SELECT 
+            vl.id AS location_id,
+            vl.name AS clinic_name,
+            vl.line1 AS address,
+            vl.city AS city,
+            vl.lat,
+            vl.lng,
+            u.id AS vet_id,
+            u.name AS vet_name,
+            (
+                6371 * acos(
+                    cos(radians(:lat)) * cos(radians(vl.lat)) *
+                    cos(radians(vl.lng) - radians(:lng)) +
+                    sin(radians(:lat)) * sin(radians(vl.lat))
+                )
+            ) AS distance_km
+        FROM vet_locations vl
+        JOIN users u ON u.id = vl.user_id
+        ORDER BY distance_km ASC
+        LIMIT :limit
+    """), {"lat": lat, "lng": lng, "limit": limit}).fetchall()
+
+    return [dict(r._mapping) for r in rows]
+
+
+@router.get("/clinics/all")
+def list_all_clinics(db: Session = Depends(get_db)):
+    rows = db.execute(text("""
+        SELECT 
+            vl.id AS id,
+            vl.name AS name,
+            vl.line1 AS line1,
+            vl.city AS city,
+            vl.lat AS lat,
+            vl.lng AS lng,
+            u.id AS vet_id,
+            u.name AS vet_name,
+            vp.display_name AS display_name
+        FROM vet_locations vl
+        JOIN users u ON u.id = vl.user_id
+        LEFT JOIN vet_profiles vp ON vp.user_id = u.id
+        ORDER BY city, name
+    """)).fetchall()
+
+    return [dict(r._mapping) for r in rows]
+
+
+def _parse_hours(hours: Optional[str]) -> Optional[tuple[time, time]]:
+    """
+    Simplest Hours format: '09:00-13:00' or '9-17'.
+    Returns (start_time, end_time) or None if invalid.
+    """
+    if not hours:
+        return None
+    try:
+        part = hours.split(",")[0].strip()  # if multiple ranges, use first
+        start_s, end_s = [p.strip() for p in part.split("-")]
+        if ":" not in start_s:
+            start_s = f"{start_s}:00"
+        if ":" not in end_s:
+            end_s = f"{end_s}:00"
+        h1, m1 = [int(x) for x in start_s.split(":")]
+        h2, m2 = [int(x) for x in end_s.split(":")]
+        return time(h1, m1), time(h2, m2)
+    except Exception:
+        return None
+    
 # helper to normalize a profile row into a proper dict with "id"
 def _normalize_profile_row(row):
     if row is None:
@@ -176,6 +260,7 @@ async def list_locations(uid: int = Depends(current_user_id)):
         )
         rows = await cur.fetchall()  # -> list[dict] like [{"id":1,"name":"..."}]
     return rows
+
 
 @router.get("/{vet_id}/queue")
 def queue(vet_id: int) -> Dict[str, Any]:

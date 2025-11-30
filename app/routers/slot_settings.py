@@ -1,6 +1,7 @@
 # app/routers/slot_settings.py
 from datetime import datetime, date, time, timedelta
 from typing import List, Optional, Literal, Dict, Any, Tuple, Union
+from app.api.models.appointments import Slot
 from app.dependencies import get_db
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, model_validator
@@ -269,13 +270,6 @@ class SlotSegment(BaseModel):
     end: str
     status: Literal["available", "blocked", "full", "break", "gap", "working"]
 
-class Slot(BaseModel):
-    """A computed time slice with its availability."""
-    start: str
-    end: str
-    capacity: int
-    booked: int = 0
-    status: Literal["available", "full", "blocked"] = "available"
 
 class UpdateSlotStatusPayload(BaseModel):
     slot_setting_id: int
@@ -606,6 +600,7 @@ def running_late(payload: RunningLate, db: Session = Depends(get_db)):
         9) slots     = applyLeadAndCapacity(slots, setting.lead_time_minutes, ovp.capacity_overrides, public)
        10) return sort(slots)
     """
+    
 @router.get("/slots", response_model=List[Slot])
 def get_slots_for_day(
     date_str: str = Query(..., description="YYYY-MM-DD"),
@@ -615,8 +610,24 @@ def get_slots_for_day(
     db: Session = Depends(get_db),
     user = Depends(require_user),
 ):
+    try:
+        return get_slots_for_day_internal(date_str, location_id, consultation_type, public, db, user)
+    except HTTPException as exc:
+        raise    
+            
+# @router.get("/slots", response_model=List[Slot])
+def get_slots_for_day_internal(
+    date_str: str,
+    location_id: int,
+    consultation_type: Literal["video", "in_person"],
+    public: bool,
+    db: Session,
+    slot_setting_owner,
+):
+    
     """Slots for the authenticated vet (user.id from token)."""
-    ctx_user_id = int(user["id"])
+    ctx_user_id = int(slot_setting_owner["id"])
+    print(f"ctx_user_id={ctx_user_id}")
     day = _parse_date_or_400(date_str)
 
     # pick effective setting for *this* vet
