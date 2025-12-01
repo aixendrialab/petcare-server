@@ -4,6 +4,7 @@ from app.core.db import init_pool, close_pool
 from .routers import appointments, lot_d, auth, uploads, vet,parent
 from app.routers.slot_settings import router as slot_settings_router  
 from fastapi.staticfiles import StaticFiles
+from app.api.models import Base
 
 import json
 import logging

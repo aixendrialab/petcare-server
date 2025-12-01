@@ -2,20 +2,17 @@
 from datetime import datetime, date, time, timedelta
 from typing import List, Optional, Literal, Dict, Any, Tuple, Union
 from app.api.models.appointments import Slot
+from app.api.models.slot_overrides import SlotOverride
+from app.api.models.slot_settings import SlotSetting
 from app.dependencies import get_db
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import (
-    Column, Integer, String, ForeignKey, Date, JSON, Boolean,
-    UniqueConstraint, Index, or_, text
-)
+from sqlalchemy import (or_, text)
 from sqlalchemy.orm import Session
 from app.api.models import Base
 from fastapi import Depends
 from app.routers.security import require_user
 from app.utils.time import now_utc, today_utc, time_after_utc
-from sqlalchemy.ext.mutable import MutableDict
-from sqlalchemy.dialects.postgresql import JSONB
 
 
 router = APIRouter(prefix="/api/v1", tags=["slots", "slot-settings"], dependencies=[Depends(require_user)])
@@ -91,56 +88,6 @@ class WeekRules(BaseModel):
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to plain dict for JSONB storage."""
         return self.model_dump()
-
-
-# =============================================================================
-# SQLAlchemy models (user_id + vet_locations FK)
-# =============================================================================
-
-class SlotSetting(Base):
-    __tablename__ = "slot_settings"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-
-    # Context (required)
-    user_id = Column(Integer, nullable=False, index=True)             # FK users(id)
-    location_id = Column(Integer, nullable=True, index=True)          # FK vet_locations(id); required for in_person
-    consultation_type = Column(String, nullable=False)                # 'in_person' | 'video'
-
-    # Core knobs
-    slot_minutes = Column(Integer, nullable=False, default=15)        # consult length
-    gap_minutes = Column(Integer, nullable=False, default=0)          # buffer between slots
-    per_slot_capacity = Column(Integer, nullable=False, default=1)
-    lead_time_minutes = Column(Integer, nullable=False, default=0)    # rolling buffer (parent view, same day)
-    booking_window_days = Column(Integer, nullable=False, default=30) # rolling horizon
-    visible_to_parents = Column(Boolean, nullable=False, default=True)
-
-    # Template & exceptions
-    week_rules = Column(JSON, nullable=False, default={})             # validated via Pydantic on create/update
-    blackout_dates = Column(JSON, nullable=False, default=[])
-
-    # Optional versioning of rules
-    effective_from = Column(Date, nullable=True)
-    effective_to   = Column(Date, nullable=True)
-
-    __table_args__ = (
-        UniqueConstraint("user_id", "location_id", "consultation_type", name="uq_slot_settings_ctx"),
-        Index("ix_slot_settings_effective", "effective_from", "effective_to"),
-    )
-
-
-class SlotOverride(Base):
-    __tablename__ = "slot_overrides"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    slot_setting_id = Column(Integer, ForeignKey("slot_settings.id", ondelete="CASCADE"),
-                             nullable=False, index=True)
-    date = Column(Date, nullable=False, index=True)
-    payload = Column(MutableDict.as_mutable(JSONB), default=dict)              # validated on input
-
-    __table_args__ = (
-        UniqueConstraint("slot_setting_id", "date", name="uq_slot_overrides_day"),
-    )
 
 
 # =============================================================================

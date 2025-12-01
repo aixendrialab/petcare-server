@@ -18,9 +18,9 @@ class Slot(BaseModel):
 class AppointmentCreate(BaseModel):
     vet_id: int
     location_id: int
-    parent_id: int
+    #parent_id: int
     pet_id: int
-    slot_id: Optional[int] = None
+    #slot_id: str
     mode: str = Field(pattern="^(in_person|video)$") 
     start_ts: datetime
     end_ts: datetime
@@ -31,18 +31,24 @@ class AppointmentOut(BaseModel):
     location_id: int
     parent_id: int
     pet_id: int
-    slot_id: Optional[int]
+    slot_id: str
     mode: str
     start_ts: datetime
     end_ts: datetime
     calendar_state: str
     visit_state: Optional[str] = None
     notes: Optional[str] = None
+    vet_name: Optional[str] = None
+    location_name: Optional[str] = None
+    pet_name: Optional[str] = None
+
+    class Config:
+        orm_mode = True
 
 class Appointment(Base):
     __tablename__ = "appointments"
     id = Column(Integer, primary_key=True)
-    slot_id = Column(Integer, ForeignKey("slots.id", ondelete="SET NULL"))
+    slot_id = Column(String, nullable=False)
     vet_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     location_id = Column(Integer, ForeignKey("vet_locations.id", ondelete="CASCADE"), nullable=False)
     parent_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)

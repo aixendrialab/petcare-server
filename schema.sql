@@ -156,3 +156,39 @@ BEGIN
       ON slot_overrides (slot_setting_id, date);
   END IF;
 END$$;
+
+CREATE TABLE appointments (
+    id SERIAL PRIMARY KEY,
+
+    slot_id TExt NOT NULL, 
+
+    vet_id INTEGER NOT NULL
+        REFERENCES users(id)
+        ON DELETE CASCADE,
+
+    location_id INTEGER NOT NULL
+        REFERENCES vet_locations(id)
+        ON DELETE CASCADE,
+
+    parent_id INTEGER NOT NULL
+        REFERENCES users(id)
+        ON DELETE CASCADE,
+
+    pet_id INTEGER NOT NULL
+        REFERENCES pets(id)
+        ON DELETE CASCADE,
+
+    mode TEXT NOT NULL,                      -- "in_person" | "video"
+    
+    start_ts TIMESTAMPTZ NOT NULL,
+    end_ts   TIMESTAMPTZ NOT NULL,
+
+    calendar_state TEXT NOT NULL,            -- "booked", "rescheduled", "cancelled", etc.
+    visit_state TEXT,                        -- "ARRIVED", "IN_CONSULTATION", etc.
+
+    notes TEXT,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE appointments ADD CONSTRAINT uq_appointment_unique UNIQUE (location_id, start_ts, end_ts);

@@ -1,13 +1,18 @@
-from fastapi import APIRouter, HTTPException, Query, Depends
+import hashlib
+from fastapi import APIRouter, HTTPException, Query, Depends, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 from app.dependencies import get_db
 from typing import List, Literal
 from pydantic import BaseModel
 from app.dependencies import get_db
 from app.routers.security import current_user_id, require_user
-from app.routers.slot_settings import get_slots_for_day, get_slots_for_day_internal  # 👈 reuse the real engine
+from app.routers.slot_settings import get_slots_for_day_internal  # 👈 reuse the real engine
 from app.api.models.appointments import Appointment, AppointmentCreate, AppointmentOut, Slot   # <-- full Slot model
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     dependencies=[Depends(current_user_id)],
@@ -69,62 +74,170 @@ def list_simple_slots(
     print(f"📌 Slots found: {len(slots)}")
     return slots   # <-- Already List[Slot], Pydantic model serializes automatically
 
-@router.get("")
-def list_appointments():
-    return []
+@router.get("", response_model=list[AppointmentOut])
+def list_appointments(
+    mine: int = Query(0),
+    status: str | None = Query(None),
+    db: Session = Depends(get_db),
+    user = Depends(require_user),
+):
+    parent_id = int(user["id"])
 
+    sql = sql = """
+    SELECT 
+        a.id,
+        a.vet_id,
+        a.location_id,
+        a.parent_id,
+        a.pet_id,
+        p.name AS pet_name,
+        a.slot_id,
+        a.mode,
+        a.start_ts,
+        a.end_ts,
+        a.calendar_state,
+        a.visit_state,
+        a.notes,
+
+        u.name AS vet_name,
+        v.name AS location_name
+
+    FROM appointments a
+    JOIN users u ON u.id = a.vet_id
+    JOIN vet_locations v ON v.id = a.location_id
+    JOIN pets p ON p.id = a.pet_id
+
+    WHERE (:mine = 0 OR a.parent_id = :parent_id)
+    AND   (:status IS NULL OR a.calendar_state = :status)
+
+    ORDER BY a.start_ts ASC
+"""
+
+
+    rows = db.execute(
+        text(sql),
+        {
+            "mine": mine,
+            "parent_id": parent_id,
+            "status": status,
+        }
+    ).mappings().all()
+
+    # rows is already dictionaries — perfect for Pydantic
+    return rows
+
+
+# create appointment
 @router.post("", response_model=AppointmentOut)
 def create_appointment(
     payload: AppointmentCreate,
     db: Session = Depends(get_db),
     user = Depends(require_user),
 ):
-    parent_id = int(user["id"])
+    logger.info(f"📥 My Incoming appointment request: {payload}")
 
-    # Resolve vet_id from clinic
-    row = db.execute(
-        text("SELECT user_id FROM vet_locations WHERE id=:loc"),
-        {"loc": payload.location_id}
-    ).first()
-    if not row:
-        raise HTTPException(404, "Invalid clinic/location")
-    vet_id = int(row[0])
+    try:
+        parent_id = int(user["id"])
 
-    # Conflict check
-    conflict = db.execute(
-        text("""
-            SELECT 1 FROM appointments
-            WHERE location_id=:loc
-            AND start_ts < :end
-            AND end_ts > :start
-        """),
-        {
-            "loc": payload.location_id,
-            "start": payload.start_ts,
-            "end": payload.end_ts
-        }
-    ).first()
+        # ---------------------------------------------------------
+        # 1️⃣ Resolve vet_id from location (correct source of truth)
+        # ---------------------------------------------------------
+        row = db.execute(
+            text("SELECT user_id FROM vet_locations WHERE id=:loc"),
+            {"loc": payload.location_id}
+        ).first()
 
-    if conflict:
-        raise HTTPException(409, "Slot already booked")
+        if not row:
+            logger.error(f"❌ Invalid clinic_id={payload.location_id}")
+            raise HTTPException(404, "Invalid clinic/location")
 
-    # Insert
-    ap = Appointment(
-        vet_id=vet_id,
-        location_id=payload.location_id,
-        parent_id=parent_id,
-        pet_id=payload.pet_id,
-        mode=payload.mode,
-        start_ts=payload.start_ts,
-        end_ts=payload.end_ts,
-        slot_id=None,
-        calendar_state="BOOKED"
+        vet_id = int(row[0])
+        logger.info(f"✔ resolved vet_id={vet_id} for location={payload.location_id}")
+
+        # ---------------------------------------------------------
+        # 2️⃣ Generate secure slot token
+        # ---------------------------------------------------------
+        slot_id = generate_slot_token(
+            vet_id,
+            parent_id,
+            payload.pet_id,
+            payload.start_ts
+        )
+
+        # ---------------------------------------------------------
+        # 3️⃣ Conflict check (overlapping slots)
+        # ---------------------------------------------------------
+        conflict = db.execute(
+            text("""
+                SELECT 1 FROM appointments
+                WHERE location_id = :loc
+                AND start_ts < :end
+                AND end_ts > :start
+            """),
+            {
+                "loc": payload.location_id,
+                "start": payload.start_ts,
+                "end": payload.end_ts
+            }
+        ).first()
+
+        if conflict:
+            logger.warning(
+                f"⚠ Conflict: Appointment exists for {payload.start_ts}-{payload.end_ts}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Slot already booked"
+            )
+
+        # ---------------------------------------------------------
+        # 4️⃣ Create appointment record
+        # ---------------------------------------------------------
+        appt = Appointment(
+            vet_id=vet_id,
+            parent_id=parent_id,
+            pet_id=payload.pet_id,
+            location_id=payload.location_id,
+            mode=payload.mode,
+            start_ts=payload.start_ts,
+            end_ts=payload.end_ts,
+            calendar_state="BOOKED",
+            slot_id=slot_id,
+        )
+
+        db.add(appt)
+        db.commit()
+        db.refresh(appt)
+
+        logger.info(f"✅ Appointment created id={appt.id}")
+
+        return appt
+
+    except SQLAlchemyError as e:
+        logger.exception("❌ Database Error while booking appointment")
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database error: {str(e)}"
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception("❌ Unexpected Error in create_appointment")
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected error: {str(e)}"
+        )
+
+def generate_slot_token(vet_id: int, location_id: int, pet_id: int, start_ts):
+    return (
+        f"SLT-{vet_id}-{location_id}-{pet_id}-"
+        f"{start_ts.strftime('%Y%m%d')}-"
+        f"{start_ts.strftime('%H%M')}"
     )
-    db.add(ap)
-    db.commit()
-    db.refresh(ap)
-    return ap
-
 
 @router.post("/{appointment_id}/checkin")
 def checkin(appointment_id: int):
