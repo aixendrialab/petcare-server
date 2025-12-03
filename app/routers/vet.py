@@ -41,27 +41,36 @@ def list_nearby_clinics(
     Parent selects a clinic (location_id), not a vet.
     """
     rows = db.execute(text("""
-        SELECT 
-            vl.id AS location_id,
-            vl.name AS clinic_name,
-            vl.line1 AS address,
-            vl.city AS city,
-            vl.lat,
-            vl.lng,
-            u.id AS vet_id,
-            u.name AS vet_name,
-            (
-                6371 * acos(
-                    cos(radians(:lat)) * cos(radians(vl.lat)) *
-                    cos(radians(vl.lng) - radians(:lng)) +
-                    sin(radians(:lat)) * sin(radians(vl.lat))
-                )
-            ) AS distance_km
-        FROM vet_locations vl
-        JOIN users u ON u.id = vl.user_id
-        ORDER BY distance_km ASC
-        LIMIT :limit
+SELECT 
+    vl.id AS location_id,
+    vl.name AS clinic_name,
+    vl.line1 AS address,
+    vl.city AS city,
+    vl.lat,
+    vl.lng,
+    u.id AS vet_id,
+    u.name AS vet_name,
+    (
+        6371 * acos(
+            cos(radians(:lat)) * cos(radians(vl.lat)) *
+            cos(radians(vl.lng) - radians(:lng)) +
+            sin(radians(:lat)) * sin(radians(vl.lat))
+        )
+    ) AS distance_km
+FROM vet_locations vl
+JOIN users u ON u.id = vl.user_id
+WHERE EXISTS (
+    SELECT 1 
+    FROM slot_settings ss
+    WHERE ss.user_id = vl.user_id
+      AND ss.location_id = vl.id
+      AND ss.consultation_type = 'in_person'
+      AND ss.visible_to_parents = TRUE
+)
+ORDER BY distance_km ASC
+LIMIT :limit;
     """), {"lat": lat, "lng": lng, "limit": limit}).fetchall()
+
 
     return [dict(r._mapping) for r in rows]
 
@@ -69,21 +78,30 @@ def list_nearby_clinics(
 @router.get("/clinics/all")
 def list_all_clinics(db: Session = Depends(get_db)):
     rows = db.execute(text("""
-        SELECT 
-            vl.id AS id,
-            vl.name AS name,
-            vl.line1 AS line1,
-            vl.city AS city,
-            vl.lat AS lat,
-            vl.lng AS lng,
-            u.id AS vet_id,
-            u.name AS vet_name,
-            vp.display_name AS display_name
-        FROM vet_locations vl
-        JOIN users u ON u.id = vl.user_id
-        LEFT JOIN vet_profiles vp ON vp.user_id = u.id
-        ORDER BY city, name
+   SELECT 
+    vl.id AS id,
+    vl.name AS name,
+    vl.line1 AS line1,
+    vl.city AS city,
+    vl.lat AS lat,
+    vl.lng AS lng,
+    u.id AS vet_id,
+    u.name AS vet_name,
+    vp.display_name AS display_name
+FROM vet_locations vl
+JOIN users u ON u.id = vl.user_id
+LEFT JOIN vet_profiles vp ON vp.user_id = u.id
+WHERE EXISTS (
+    SELECT 1 
+    FROM slot_settings ss
+    WHERE ss.user_id = vl.user_id
+      AND ss.location_id = vl.id
+      AND ss.consultation_type = 'in_person'
+      AND ss.visible_to_parents = TRUE
+)
+ORDER BY vl.city, vl.name;
     """)).fetchall()
+
 
     return [dict(r._mapping) for r in rows]
 
@@ -146,14 +164,17 @@ async def get_profile(uid: int = Depends(current_user_id)):
 @router.put("/register", status_code=status.HTTP_200_OK)
 async def upsert_profile(body: VetProfileIn, uid: int = Depends(current_user_id)):
     """
-    Updates the existing user’s name/email (created during OTP), upserts vet_profiles,
-    replaces vet_locations, then returns fresh profile + locations as dicts.
+    Update user + profile, replace locations, auto-create slot settings,
+    then return { profile, locations }.
     """
     async with get_conn() as conn:
+        # -------------------------------------------------------
+        # PHASE 1 — UPDATE user, profile, locations
+        # -------------------------------------------------------
         async with conn.cursor() as cur:
-            # Update user minimal fields if provided (name/email)
+
+            # ---- Update user name/email if provided ----
             if body.name or body.email:
-                # set only provided fields
                 sets = []
                 params = []
                 if body.name:
@@ -164,33 +185,38 @@ async def upsert_profile(body: VetProfileIn, uid: int = Depends(current_user_id)
                     params.append(body.email)
                 if sets:
                     params.append(uid)
-                    await cur.execute(f"UPDATE users SET {', '.join(sets)} WHERE id = %s", tuple(params))
+                    await cur.execute(
+                        f"UPDATE users SET {', '.join(sets)} WHERE id = %s",
+                        tuple(params)
+                    )
 
-            # Upsert profile (example upsert — keep your existing SQL here)
+            # ---- Upsert vet profile ----
             await cur.execute(
                 """
-                INSERT INTO vet_profiles (user_id, legal_name, display_name, business_email, billing_email,
-                                          billing_address, gstin, pan, qualifications, license_no,
-                                          experience_years, specialties, visit_in_clinic, visit_video,
-                                          fee_in_clinic, fee_video, slot_minutes)
+                INSERT INTO vet_profiles (
+                    user_id, legal_name, display_name, business_email, billing_email,
+                    billing_address, gstin, pan, qualifications, license_no,
+                    experience_years, specialties, visit_in_clinic, visit_video,
+                    fee_in_clinic, fee_video, slot_minutes
+                )
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (user_id) DO UPDATE SET
-                  legal_name = EXCLUDED.legal_name,
-                  display_name = EXCLUDED.display_name,
-                  business_email = EXCLUDED.business_email,
-                  billing_email = EXCLUDED.billing_email,
-                  billing_address = EXCLUDED.billing_address,
-                  gstin = EXCLUDED.gstin,
-                  pan = EXCLUDED.pan,
-                  qualifications = EXCLUDED.qualifications,
-                  license_no = EXCLUDED.license_no,
-                  experience_years = EXCLUDED.experience_years,
-                  specialties = EXCLUDED.specialties,
-                  visit_in_clinic = EXCLUDED.visit_in_clinic,
-                  visit_video = EXCLUDED.visit_video,
-                  fee_in_clinic = EXCLUDED.fee_in_clinic,
-                  fee_video = EXCLUDED.fee_video,
-                  slot_minutes = EXCLUDED.slot_minutes
+                    legal_name = EXCLUDED.legal_name,
+                    display_name = EXCLUDED.display_name,
+                    business_email = EXCLUDED.business_email,
+                    billing_email = EXCLUDED.billing_email,
+                    billing_address = EXCLUDED.billing_address,
+                    gstin = EXCLUDED.gstin,
+                    pan = EXCLUDED.pan,
+                    qualifications = EXCLUDED.qualifications,
+                    license_no = EXCLUDED.license_no,
+                    experience_years = EXCLUDED.experience_years,
+                    specialties = EXCLUDED.specialties,
+                    visit_in_clinic = EXCLUDED.visit_in_clinic,
+                    visit_video = EXCLUDED.visit_video,
+                    fee_in_clinic = EXCLUDED.fee_in_clinic,
+                    fee_video = EXCLUDED.fee_video,
+                    slot_minutes = EXCLUDED.slot_minutes
                 """,
                 (
                     uid,
@@ -213,12 +239,13 @@ async def upsert_profile(body: VetProfileIn, uid: int = Depends(current_user_id)
                 ),
             )
 
-            # Replace locations
+            # ---- Replace locations for the vet ----
             await cur.execute("DELETE FROM vet_locations WHERE user_id = %s", (uid,))
             for loc in (body.locations or []):
                 await cur.execute(
                     """
-                    INSERT INTO vet_locations (user_id, name, line1, line2, city, lat, lng, hours, is_primary)
+                    INSERT INTO vet_locations
+                        (user_id, name, line1, line2, city, lat, lng, hours, is_primary)
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """,
                     (
@@ -234,18 +261,93 @@ async def upsert_profile(body: VetProfileIn, uid: int = Depends(current_user_id)
                     ),
                 )
 
-        # Re-select using dict_row so JSON is object-shaped (not arrays)
-        async with conn.cursor(row_factory=dict_row) as cur2:
-            await cur2.execute("SELECT * FROM vet_profiles WHERE user_id = %s", (uid,))
-            prof = await cur2.fetchone()
-            await cur2.execute(
-                "SELECT * FROM vet_locations WHERE user_id = %s ORDER BY is_primary DESC, id",
-                (uid,),
+        # -------------------------------------------------------
+        # PHASE 2 — AUTO-CREATE SLOT SETTINGS
+        # -------------------------------------------------------
+        async with conn.cursor() as cur3:
+
+            # Fetch profile — needed for slot_minutes & visit flags
+            await cur3.execute(
+                """
+                SELECT slot_minutes, visit_in_clinic, visit_video
+                FROM vet_profiles
+                WHERE user_id = %s
+                """,
+                (uid,)
             )
-            locs = await cur2.fetchall()
+            prof = await cur3.fetchone()
+
+            slot_minutes = prof["slot_minutes"] or 15
+            supports_in_person = prof["visit_in_clinic"] == 1
+            supports_video = prof["visit_video"] == 1
+
+            # Fetch all locations for this vet
+            await cur3.execute(
+                "SELECT id FROM vet_locations WHERE user_id = %s ORDER BY id",
+                (uid,)
+            )
+            locs = await cur3.fetchall()
+
+            # Create slot settings per location
+            for loc in locs:
+                location_id = loc["id"]
+
+                # ---- In-person slot settings ----
+                if supports_in_person:
+                    await cur3.execute(
+                        """
+                        INSERT INTO slot_settings (
+                            user_id, location_id, consultation_type,
+                            slot_minutes, gap_minutes, per_slot_capacity,
+                            lead_time_minutes, booking_window_days,
+                            visible_to_parents, week_rules, blackout_dates
+                        )
+                        VALUES (%s, %s, 'in_person',
+                                %s, 0, 1,
+                                0, 30,
+                                FALSE, '{}', '[]')
+                        ON CONFLICT (user_id, location_id, consultation_type)
+                        DO NOTHING
+                        """,
+                        (uid, location_id, slot_minutes)
+                    )
+
+                # ---- Video slot settings ----
+                if supports_video:
+                    await cur3.execute(
+                        """
+                        INSERT INTO slot_settings (
+                            user_id, location_id, consultation_type,
+                            slot_minutes, gap_minutes, per_slot_capacity,
+                            lead_time_minutes, booking_window_days,
+                            visible_to_parents, week_rules, blackout_dates
+                        )
+                        VALUES (%s, NULL, 'video',
+                                %s, 0, 1,
+                                0, 30,
+                                FALSE, '{}', '[]')
+                        ON CONFLICT (user_id, location_id, consultation_type)
+                        DO NOTHING
+                        """,
+                        (uid, slot_minutes)
+                    )
+
+        # -------------------------------------------------------
+        # PHASE 3 — RETURN FRESH PROFILE + LOCATIONS
+        # -------------------------------------------------------
+        async with conn.cursor(row_factory=dict_row) as cur4:
+            await cur4.execute("SELECT * FROM vet_profiles WHERE user_id = %s", (uid,))
+            prof = await cur4.fetchone()
+
+            await cur4.execute(
+                "SELECT * FROM vet_locations WHERE user_id = %s ORDER BY is_primary DESC, id",
+                (uid,)
+            )
+            locs = await cur4.fetchall()
 
     prof = _normalize_profile_row(prof)
     return {"profile": prof, "locations": locs}
+
 
 from psycopg.rows import dict_row
 
