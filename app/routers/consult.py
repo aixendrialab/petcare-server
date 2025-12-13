@@ -439,6 +439,7 @@ def get_checkin_day(
 def complete_consult(payload: ConsultCreate, db: Session = Depends(get_db), user=Depends(require_user)):
     vet_id = int(user["id"])
 
+    create_consult(payload, db, user)
     # Reuse save logic + close appointment
     # (You may refactor to avoid duplicate code)
 
