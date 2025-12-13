@@ -129,7 +129,7 @@ def get_consult_context(
 # ------------------------------------------------------
 # 2) Save consult (new record)
 # ------------------------------------------------------
-@router.post("", response_model=dict)
+@router.post("/save", response_model=dict)
 def create_consult(
     payload: ConsultCreate,
     db: Session = Depends(get_db),
