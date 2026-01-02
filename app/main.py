@@ -81,4 +81,4 @@ app.include_router(parent.router, prefix="/api/v1/parents", tags=["parent"])
 app.include_router(slot_settings_router)                  # router already has prefix="/api/v1"
 app.include_router(appointments.router, prefix="/api/v1/appointments", tags=["appointments"])
 app.include_router(consult.router, prefix="/api/v1")
-app.include_router(vaccinations.router, prefix="/api/v1/vaccines")
+app.include_router(vaccinations.router, prefix="/api/v1/vaccines", tags=["vaccines"])

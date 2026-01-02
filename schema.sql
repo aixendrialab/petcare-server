@@ -264,24 +264,6 @@ CREATE TABLE IF NOT EXISTS consult_medication (
 CREATE INDEX IF NOT EXISTS ix_consult_pet ON consult(pet_id);
 CREATE INDEX IF NOT EXISTS ix_consult_vet ON consult(vet_id, created_at DESC);
 
-CREATE TABLE vaccination_record (
-    id SERIAL PRIMARY KEY,
-    pet_id INTEGER NOT NULL REFERENCES pets(id) ON DELETE CASCADE,
-    vaccine_name TEXT NOT NULL,          -- e.g., "Rabies", "DHPPi", "Parvo", "Kennel Cough"
-    vaccine_type TEXT,                   -- core / non-core / optional
-    last_given DATE,                     -- last administered date
-    next_due DATE,                       -- next booster or scheduled
-    status TEXT CHECK (status IN ('DUE', 'UPCOMING', 'COMPLETED', 'MISSED')) DEFAULT 'UPCOMING',
-    batch_no TEXT,                       -- vaccine batch # (optional)
-    manufacturer TEXT,                   -- optional manufacturer info
-    notes TEXT,                          -- vet notes
-    vet_id INTEGER REFERENCES vet_profiles(user_id), -- who administered
-    location_id INTEGER REFERENCES vet_locations(id),
-
-    created_at TIMESTAMP DEFAULT now(),
-    updated_at TIMESTAMP DEFAULT now()
-);
-
 ALTER TABLE pets
   ADD COLUMN microchip TEXT,
   ADD COLUMN blood_group TEXT,
@@ -300,3 +282,164 @@ CREATE INDEX IF NOT EXISTS ix_appt_vet_state_start
 
 CREATE INDEX IF NOT EXISTS ix_appt_parent_state_start
     ON appointments(parent_id, calendar_state, start_ts);
+
+
+ALTER TABLE pets ADD COLUMN IF NOT EXISTS species TEXT CHECK (species IN ('dog','cat'));
+
+-- 1) Master catalog
+CREATE TABLE IF NOT EXISTS vaccine_catalog (
+  code        TEXT NOT NULL,  -- 'RABIES', 'DHPP', 'FVRCP', 'FELV'
+  species     TEXT NOT NULL CHECK (species IN ('dog','cat')),
+  name        TEXT NOT NULL,  -- display name
+  vaccine_type TEXT NOT NULL DEFAULT 'core' CHECK (vaccine_type IN ('core','optional')),
+  description TEXT,
+  is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+
+  PRIMARY KEY (code, species)
+);
+
+-- Helpful index for browsing
+CREATE INDEX IF NOT EXISTS ix_vaccine_catalog_species ON vaccine_catalog(species);
+
+
+-- 2) Vaccination history/record (actual administered doses)
+CREATE TABLE IF NOT EXISTS vaccination_record (
+  id             SERIAL PRIMARY KEY,
+  pet_id         INTEGER NOT NULL REFERENCES pets(id) ON DELETE CASCADE,
+
+  vaccine_code   TEXT NOT NULL,
+  vaccine_species TEXT NOT NULL CHECK (vaccine_species IN ('dog','cat')),
+
+  vaccine_type   TEXT,              -- core / optional (can store snapshot for history)
+  last_given     DATE,
+  next_due       DATE,
+
+  batch_no       TEXT,
+  manufacturer   TEXT,
+  notes          TEXT,
+
+  vet_id         INTEGER REFERENCES vet_profiles(user_id),
+  location_id    INTEGER REFERENCES vet_locations(id),
+
+  created_at     TIMESTAMP DEFAULT now(),
+  updated_at     TIMESTAMP DEFAULT now(),
+
+  CONSTRAINT fk_vacc_record_catalog
+    FOREIGN KEY (vaccine_code, vaccine_species)
+    REFERENCES vaccine_catalog(code, species)
+    ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS ix_vacc_record_pet ON vaccination_record(pet_id);
+CREATE INDEX IF NOT EXISTS ix_vacc_record_next_due ON vaccination_record(next_due);
+
+
+-- 3) Default schedule “recipe” per species
+CREATE TABLE IF NOT EXISTS vaccine_rule (
+  id                    SERIAL PRIMARY KEY,
+
+  species               TEXT NOT NULL CHECK (species IN ('dog','cat')),
+
+  vaccine_code          TEXT NOT NULL,
+  vaccine_species       TEXT NOT NULL CHECK (vaccine_species IN ('dog','cat')),
+
+  -- schedule recipe (simple)
+  start_age_weeks       INT NULL,
+  dose_count            INT NOT NULL DEFAULT 1,
+  dose_interval_days    INT NOT NULL DEFAULT 21,
+  booster_interval_days INT NULL,
+
+  is_active             BOOLEAN NOT NULL DEFAULT TRUE,
+
+  CONSTRAINT ck_vaccine_rule_species_match
+    CHECK (species = vaccine_species),
+
+  CONSTRAINT fk_vaccine_rule_catalog
+    FOREIGN KEY (vaccine_code, vaccine_species)
+    REFERENCES vaccine_catalog(code, species)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS ix_vaccine_rule_species ON vaccine_rule(species);
+CREATE INDEX IF NOT EXISTS ix_vaccine_rule_vaccine ON vaccine_rule(vaccine_code, vaccine_species);
+
+
+-- 4) One plan per pet (generated / confirmed)
+CREATE TABLE IF NOT EXISTS pet_vaccine_plan (
+  id SERIAL PRIMARY KEY,
+  pet_id INT NOT NULL REFERENCES pets(id) ON DELETE CASCADE,
+
+  status TEXT NOT NULL DEFAULT 'SUGGESTED'
+    CHECK (status IN ('SUGGESTED','VET_CONFIRMED')),
+
+  generated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  confirmed_at TIMESTAMPTZ NULL,
+  confirmed_by_vet_id INT NULL REFERENCES vet_profiles(user_id),
+
+  notes TEXT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_pet_vaccine_plan_pet ON pet_vaccine_plan(pet_id);
+
+
+-- 5) Plan items (due schedule)
+CREATE TABLE IF NOT EXISTS pet_vaccine_plan_item (
+  id SERIAL PRIMARY KEY,
+  plan_id INT NOT NULL REFERENCES pet_vaccine_plan(id) ON DELETE CASCADE,
+
+  vaccine_code    TEXT NOT NULL,
+  vaccine_species TEXT NOT NULL CHECK (vaccine_species IN ('dog','cat')),
+
+  dose_no INT NOT NULL DEFAULT 1,
+  due_on  DATE NOT NULL,
+
+  status TEXT NOT NULL DEFAULT 'UPCOMING'
+    CHECK (status IN ('DUE','UPCOMING','COMPLETED','MISSED','SKIPPED')),
+
+  completed_on DATE NULL,
+  completed_record_id INT NULL REFERENCES vaccination_record(id),
+
+  overridden BOOLEAN NOT NULL DEFAULT FALSE,
+  override_reason TEXT NULL,
+
+  CONSTRAINT fk_plan_item_catalog
+    FOREIGN KEY (vaccine_code, vaccine_species)
+    REFERENCES vaccine_catalog(code, species)
+    ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS ix_plan_item_due ON pet_vaccine_plan_item(due_on, status);
+CREATE INDEX IF NOT EXISTS ix_plan_item_plan ON pet_vaccine_plan_item(plan_id);
+
+
+-- 6) Appointment-level intent (parent requests vaccine action during consult)
+CREATE TABLE IF NOT EXISTS vaccination_intent (
+  id SERIAL PRIMARY KEY,
+  appointment_id INT NOT NULL REFERENCES appointments(id) ON DELETE CASCADE,
+  pet_id INT NOT NULL REFERENCES pets(id) ON DELETE CASCADE,
+
+  requested_vaccine_code TEXT NULL,
+  requested_vaccine_species TEXT NULL CHECK (requested_vaccine_species IN ('dog','cat')),
+
+  requested_action TEXT NOT NULL DEFAULT 'ADMINISTER'
+    CHECK (requested_action IN ('ADMINISTER','CONFIRM_PLAN','BOTH')),
+
+  parent_notes TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  -- if one is set, the other must be set
+  CONSTRAINT ck_vacc_intent_vaccine_pair
+    CHECK (
+      (requested_vaccine_code IS NULL AND requested_vaccine_species IS NULL)
+      OR
+      (requested_vaccine_code IS NOT NULL AND requested_vaccine_species IS NOT NULL)
+    ),
+
+  CONSTRAINT fk_vacc_intent_catalog
+    FOREIGN KEY (requested_vaccine_code, requested_vaccine_species)
+    REFERENCES vaccine_catalog(code, species)
+    ON DELETE RESTRICT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_vacc_intent_appt ON vaccination_intent(appointment_id);
+CREATE INDEX IF NOT EXISTS ix_vacc_intent_pet ON vaccination_intent(pet_id);

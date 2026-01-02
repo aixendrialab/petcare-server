@@ -186,3 +186,207 @@ SELECT s.id, CURRENT_DATE + INTERVAL '2 day',
 FROM s
 ON CONFLICT (slot_setting_id, "date")
 DO UPDATE SET payload = slot_overrides.payload || EXCLUDED.payload;
+
+-- =========================================================
+-- VACCINATION MASTER + PLAN + HISTORY SEED (INTEGRATED)
+-- =========================================================
+
+-- ---------------------------------------------------------
+-- 0) Ensure pets have species (required everywhere)
+-- ---------------------------------------------------------
+UPDATE pets SET species='dog'
+WHERE name='Bruno' AND (species IS NULL OR species='');
+
+UPDATE pets SET species='cat'
+WHERE name='Misty' AND (species IS NULL OR species='');
+
+-- ---------------------------------------------------------
+-- 1) Vaccine Catalog (Admin-controlled master)
+-- ---------------------------------------------------------
+INSERT INTO vaccine_catalog (code, species, name, vaccine_type, description, is_active) VALUES
+
+-- DOG – CORE
+('DHPP','dog','DHPP / DHPPi (Distemper, Hepatitis, Parvo, Parainfluenza)','core',
+ 'Primary puppy series + booster', TRUE),
+('RABIES','dog','Rabies','core',
+ 'Rabies vaccination', TRUE),
+
+-- DOG – OPTIONAL / RISK BASED
+('LEPTO','dog','Leptospirosis','optional','Often annual; risk-based', TRUE),
+('KC','dog','Kennel Cough (Bordetella)','optional','Boarding/grooming requirement', TRUE),
+('CORONA','dog','Canine Coronavirus','optional','Risk-based', TRUE),
+('LYME','dog','Lyme','optional','Tick-risk regions', TRUE),
+
+-- CAT – CORE
+('FVRCP','cat','FVRCP (Feline Viral Rhinotracheitis, Calici, Panleukopenia)','core',
+ 'Kitten series + booster', TRUE),
+('RABIES','cat','Rabies','core',
+ 'Rabies vaccination', TRUE),
+
+-- CAT – OPTIONAL
+('FELV','cat','FeLV (Feline Leukemia Virus)','optional',
+ 'Risk-based; kittens / outdoor cats', TRUE),
+('FIV','cat','FIV (Feline Immunodeficiency Virus)','optional',
+ 'Rarely used; availability varies', TRUE)
+
+ON CONFLICT (code, species) DO NOTHING;
+
+
+-- ---------------------------------------------------------
+-- 2) Vaccine Rules (Default schedule recipes)
+-- ---------------------------------------------------------
+
+-- DOG rules
+INSERT INTO vaccine_rule (
+  species, vaccine_id,
+  start_age_weeks, dose_count, dose_interval_days, booster_interval_days,
+  is_active
+)
+SELECT 'dog', c.id, 6, 3, 21, 365, TRUE FROM vaccine_catalog c WHERE c.code='DHPP' AND c.species='dog'
+UNION ALL
+SELECT 'dog', c.id, 12, 1, 21, 365, TRUE FROM vaccine_catalog c WHERE c.code='RABIES' AND c.species='dog'
+UNION ALL
+SELECT 'dog', c.id, 12, 2, 21, 365, TRUE FROM vaccine_catalog c WHERE c.code='LEPTO' AND c.species='dog'
+UNION ALL
+SELECT 'dog', c.id, 12, 1, 21, 365, TRUE FROM vaccine_catalog c WHERE c.code='KC' AND c.species='dog'
+UNION ALL
+SELECT 'dog', c.id, 12, 1, 21, 365, TRUE FROM vaccine_catalog c WHERE c.code='CORONA' AND c.species='dog'
+UNION ALL
+SELECT 'dog', c.id, 12, 2, 21, 365, TRUE FROM vaccine_catalog c WHERE c.code='LYME' AND c.species='dog'
+ON CONFLICT DO NOTHING;
+
+-- CAT rules
+INSERT INTO vaccine_rule (
+  species, vaccine_id,
+  start_age_weeks, dose_count, dose_interval_days, booster_interval_days,
+  is_active
+)
+SELECT 'cat', c.id, 6, 3, 21, 365, TRUE FROM vaccine_catalog c WHERE c.code='FVRCP' AND c.species='cat'
+UNION ALL
+SELECT 'cat', c.id, 12, 1, 21, 365, TRUE FROM vaccine_catalog c WHERE c.code='RABIES' AND c.species='cat'
+UNION ALL
+SELECT 'cat', c.id, 8, 2, 21, 365, TRUE FROM vaccine_catalog c WHERE c.code='FELV' AND c.species='cat'
+UNION ALL
+SELECT 'cat', c.id, 12, 2, 21, 365, TRUE FROM vaccine_catalog c WHERE c.code='FIV' AND c.species='cat'
+ON CONFLICT DO NOTHING;
+
+
+-- ---------------------------------------------------------
+-- 3) Create vaccine plans for seeded pets
+-- ---------------------------------------------------------
+INSERT INTO pet_vaccine_plan (pet_id, status, generated_at, notes)
+SELECT p.id, 'SUGGESTED', now(), 'Seeded vaccination plan'
+FROM pets p
+WHERE p.name IN ('Bruno','Misty')
+ON CONFLICT (pet_id) DO NOTHING;
+
+
+-- ---------------------------------------------------------
+-- 4) Plan items – Bruno (Dog)
+-- ---------------------------------------------------------
+WITH plan AS (
+  SELECT pp.id AS plan_id
+  FROM pet_vaccine_plan pp
+  JOIN pets p ON p.id = pp.pet_id
+  WHERE p.name='Bruno'
+)
+INSERT INTO pet_vaccine_plan_item (
+  plan_id, vaccine_id, vaccine_code, vaccine_species,
+  dose_no, due_on, status
+)
+SELECT plan.plan_id, c.id, c.code, c.species, 0, CURRENT_DATE + 3, 'DUE'
+FROM plan JOIN vaccine_catalog c ON c.code='DHPP' AND c.species='dog'
+UNION ALL
+SELECT plan.plan_id, c.id, c.code, c.species, 0, CURRENT_DATE + 20, 'UPCOMING'
+FROM plan JOIN vaccine_catalog c ON c.code='RABIES' AND c.species='dog'
+UNION ALL
+SELECT plan.plan_id, c.id, c.code, c.species, 0, CURRENT_DATE + 35, 'UPCOMING'
+FROM plan JOIN vaccine_catalog c ON c.code='LEPTO' AND c.species='dog'
+ON CONFLICT DO NOTHING;
+
+
+-- ---------------------------------------------------------
+-- 5) Plan items – Misty (Cat)
+-- ---------------------------------------------------------
+WITH plan AS (
+  SELECT pp.id AS plan_id
+  FROM pet_vaccine_plan pp
+  JOIN pets p ON p.id = pp.pet_id
+  WHERE p.name='Misty'
+)
+INSERT INTO pet_vaccine_plan_item (
+  plan_id, vaccine_id, vaccine_code, vaccine_species,
+  dose_no, due_on, status
+)
+SELECT plan.plan_id, c.id, c.code, c.species, 0, CURRENT_DATE + 10, 'UPCOMING'
+FROM plan JOIN vaccine_catalog c ON c.code='FVRCP' AND c.species='cat'
+UNION ALL
+SELECT plan.plan_id, c.id, c.code, c.species, 0, CURRENT_DATE + 1, 'DUE'
+FROM plan JOIN vaccine_catalog c ON c.code='RABIES' AND c.species='cat'
+UNION ALL
+SELECT plan.plan_id, c.id, c.code, c.species, 0, CURRENT_DATE + 28, 'UPCOMING'
+FROM plan JOIN vaccine_catalog c ON c.code='FELV' AND c.species='cat'
+ON CONFLICT DO NOTHING;
+
+
+-- ---------------------------------------------------------
+-- 6) One completed vaccination record (history demo)
+-- ---------------------------------------------------------
+WITH bruno AS (
+  SELECT p.id AS pet_id FROM pets p WHERE p.name='Bruno'
+),
+rec AS (
+  INSERT INTO vaccination_record (
+    pet_id, vaccine_id, vaccine_code, vaccine_species,
+    vaccine_type, last_given, next_due,
+    notes, vet_id, location_id
+  )
+  SELECT
+    b.pet_id,
+    c.id,
+    c.code,
+    c.species,
+    'core',
+    CURRENT_DATE - 365,
+    CURRENT_DATE + 3,
+    'Seeded completed DHPP',
+    1,
+    101
+  FROM bruno b
+  JOIN vaccine_catalog c ON c.code='DHPP' AND c.species='dog'
+  RETURNING id
+)
+UPDATE pet_vaccine_plan_item pi
+SET status='COMPLETED',
+    completed_on=CURRENT_DATE - 365,
+    completed_record_id=(SELECT id FROM rec)
+WHERE pi.id = (
+  SELECT pi2.id
+  FROM pet_vaccine_plan_item pi2
+  JOIN pet_vaccine_plan pp ON pp.id = pi2.plan_id
+  JOIN pets p ON p.id = pp.pet_id
+  WHERE p.name='Bruno'
+    AND pi2.vaccine_code='DHPP'
+  ORDER BY pi2.due_on
+  LIMIT 1
+);
+
+
+-- ---------------------------------------------------------
+-- 7) Sync sequences (clean state)
+-- ---------------------------------------------------------
+SELECT setval(pg_get_serial_sequence('vaccine_catalog','id'),
+  COALESCE((SELECT MAX(id) FROM vaccine_catalog),0)+1, false);
+
+SELECT setval(pg_get_serial_sequence('vaccine_rule','id'),
+  COALESCE((SELECT MAX(id) FROM vaccine_rule),0)+1, false);
+
+SELECT setval(pg_get_serial_sequence('pet_vaccine_plan','id'),
+  COALESCE((SELECT MAX(id) FROM pet_vaccine_plan),0)+1, false);
+
+SELECT setval(pg_get_serial_sequence('pet_vaccine_plan_item','id'),
+  COALESCE((SELECT MAX(id) FROM pet_vaccine_plan_item),0)+1, false);
+
+SELECT setval(pg_get_serial_sequence('vaccination_record','id'),
+  COALESCE((SELECT MAX(id) FROM vaccination_record),0)+1, false);
+
