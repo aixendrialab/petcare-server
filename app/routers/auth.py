@@ -1,4 +1,6 @@
 # app/routers/auth.py
+from app.api.models.parent import ParentPetIn, ParentProfileIn, PetsUpsert
+from app.api.models.users import RolesIn
 from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel, Field
 from psycopg.errors import UniqueViolation  # psycopg3
@@ -26,44 +28,6 @@ class OTPReq(BaseModel):
 class OTPVerify(BaseModel):
     phone: str
     otp: str
-
-class RegisterParentPet(BaseModel):
-    name: str
-    breed: Optional[str] = None
-    dob: Optional[str] = None
-    gender: Optional[str] = None
-    vaccine_status: Optional[str] = None
-    rewards: Optional[str] = None
-    picture_uri: Optional[str] = None
-
-class RegisterParent(BaseModel):
-    name: str
-    email: Optional[str] = None
-    pets: List[RegisterParentPet] = Field(default_factory=list)
-
-class RegisterProfile(BaseModel):
-    name: str
-    email: Optional[str] = None
-
-class RolesIn(BaseModel):
-    roles: List[str]  # ["parent","vet",...]
-
-class PetIn(BaseModel):
-    name: str
-    breed: Optional[str] = None
-    dob: Optional[str] = None       # YYYY-MM-DD
-    gender: Optional[str] = None    # 'male'|'female'|'unknown'
-    vaccine_status: Optional[str] = None
-    rewards: Optional[str] = None
-    picture_uri: Optional[str] = None
-
-class PetsUpsert(BaseModel):
-    pets: List[PetIn]
-
-class RegisterFull(BaseModel):
-    name: str
-    email: Optional[str] = None
-    pets: List[PetIn]
 
 # ---------- Token helpers ----------
 
@@ -164,22 +128,8 @@ async def get_me_alias(authorization: Optional[str] = Header(None)):
 
 # app/auth.py (add next to your existing routes)
 
-class RegisterParentPet(BaseModel):
-    name: str
-    breed: Optional[str] = None
-    dob: Optional[str] = None
-    gender: Optional[str] = None
-    vaccine_status: Optional[str] = None
-    rewards: Optional[str] = None
-    picture_uri: Optional[str] = None
-
-class RegisterParent(BaseModel):
-    name: str
-    email: Optional[str] = None
-    pets: List[RegisterParentPet] = Field(default_factory=list)
-
 @router.post("/users/register-parent")
-async def register_parent(body: RegisterParent, authorization: Optional[str] = Header(None)):
+async def register_parent(body: ParentProfileIn, authorization: Optional[str] = Header(None)):
     claims = parse_auth(authorization)
     phone = claims.get("sub")
     if claims.get("type") != "pre" or not phone:  # must be a PRE token
@@ -211,10 +161,10 @@ async def register_parent(body: RegisterParent, authorization: Optional[str] = H
                     continue
                 await conn.execute(
                     """
-                    INSERT INTO pets (user_id, name, breed, dob, gender, vaccine_status, rewards, picture_uri)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                    INSERT INTO pets (user_id, name, breed, species, dob, gender, vaccine_status, rewards, picture_uri)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """,
-                    (user_id, p.name, p.breed, p.dob, p.gender, p.vaccine_status, p.rewards, p.picture_uri)
+                    (user_id, p.name, p.breed, p.species, p.dob, p.gender, p.vaccine_status, p.rewards, p.picture_uri)
                 )
 
     # Issue ACTUAL token and include roles/active in the response
@@ -231,7 +181,7 @@ async def register_parent(body: RegisterParent, authorization: Optional[str] = H
 
 # Save profile (name/email). If pre-token, this is where we “complete” registration.
 @router.post("/users/register")
-async def register_profile(body: RegisterProfile, authorization: Optional[str] = Header(None)):
+async def register_profile(body: ParentProfileIn, authorization: Optional[str] = Header(None)):
     claims = parse_auth(authorization)
     phone = claims["sub"]
 
@@ -251,7 +201,7 @@ async def register_profile(body: RegisterProfile, authorization: Optional[str] =
 
 
 @router.post("/users/register-full")
-async def register_full(body: RegisterFull, authorization: Optional[str] = Header(None)):
+async def register_full(body: ParentProfileIn, authorization: Optional[str] = Header(None)):
     """
     Completes onboarding for a *new* user (must present a pre-token).
     Creates the user, optional pets, optional roles, and (optionally) sets active role.
@@ -296,14 +246,15 @@ async def register_full(body: RegisterFull, authorization: Optional[str] = Heade
                 await cur.execute(
                     """
                     INSERT INTO pets
-                      (owner_user_id, name, breed, dob, gender, vaccine_status, rewards, picture_uri)
+                      (owner_user_id, name, breed, species, dob, gender, vaccine_status, rewards, picture_uri)
                     VALUES
-                      (%s, %s, %s, %s, %s, %s, %s, %s)
+                      (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         user_id,
                         name,
                         p.breed,
+                        p.species,
                         p.dob,
                         p.gender,
                         p.vaccine_status,
@@ -456,7 +407,7 @@ async def list_pets(authorization: Optional[str] = Header(None)):
             raise HTTPException(status_code=404, detail="User not found")
         user_id = row[0]
         await cur.execute("""
-          SELECT id, name, breed, dob, gender, vaccine_status, rewards, picture_uri
+          SELECT id, name, breed, species, dob, gender, vaccine_status, rewards, picture_uri
           FROM pets WHERE user_id=%s ORDER BY id
         """, (user_id,))
         pets = []
@@ -489,9 +440,9 @@ async def add_pets(body: PetsUpsert, authorization: Optional[str] = Header(None)
 
         for p in pets:
             await cur.execute("""
-              INSERT INTO pets (user_id, name, breed, dob, gender, vaccine_status, rewards, picture_uri)
-              VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """, (user_id, p.name, p.breed, p.dob, p.gender, p.vaccine_status, p.rewards, p.picture_uri))
+              INSERT INTO pets (user_id, name, breed, species, dob, gender, vaccine_status, rewards, picture_uri)
+              VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (user_id, p.name, p.breed, p.species, p.dob, p.gender, p.vaccine_status, p.rewards, p.picture_uri))
         await conn.commit()
 
     return await list_pets(authorization)
@@ -515,9 +466,9 @@ async def replace_pets(body: PetsUpsert, authorization: Optional[str] = Header(N
         await cur.execute("DELETE FROM pets WHERE user_id=%s", (user_id,))
         for p in new_pets:
             await cur.execute("""
-              INSERT INTO pets (user_id, name, breed, dob, gender, vaccine_status, rewards, picture_uri)
-              VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """, (user_id, p.name, p.breed, p.dob, p.gender, p.vaccine_status, p.rewards, p.picture_uri))
+              INSERT INTO pets (user_id, name, breed, species, dob, gender, vaccine_status, rewards, picture_uri)
+              VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (user_id, p.name, p.breed, p.species, p.dob, p.gender, p.vaccine_status, p.rewards, p.picture_uri))
         await conn.commit()
 
     return await list_pets(authorization)

@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.db import init_pool, close_pool
-from .routers import appointments, lot_d, auth, uploads, vet,parent, vet_schedule, consult, vaccinations
+from .routers import appointments, lot_d, auth, uploads, vet,parent, vet_schedule, consult, vaccinations, providers, store, shop, orders, cart
 from app.routers.slot_settings import router as slot_settings_router  
 from fastapi.staticfiles import StaticFiles
 from app.api.models import Base
@@ -82,3 +82,9 @@ app.include_router(slot_settings_router)                  # router already has p
 app.include_router(appointments.router, prefix="/api/v1/appointments", tags=["appointments"])
 app.include_router(consult.router, prefix="/api/v1")
 app.include_router(vaccinations.router, prefix="/api/v1/vaccines", tags=["vaccines"])
+
+app.include_router(providers.router, prefix="/api/v1", tags=["providers"])
+app.include_router(store.router, prefix="/api/v1", tags=["store"])
+app.include_router(shop.router, prefix="/api/v1", tags=["shop"])
+app.include_router(orders.router, prefix="/api/v1", tags=["orders"])
+app.include_router(cart.router, prefix="/api/v1", tags=["cart"])

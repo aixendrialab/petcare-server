@@ -390,3 +390,44 @@ SELECT setval(pg_get_serial_sequence('pet_vaccine_plan_item','id'),
 SELECT setval(pg_get_serial_sequence('vaccination_record','id'),
   COALESCE((SELECT MAX(id) FROM vaccination_record),0)+1, false);
 
+INSERT INTO user_roles (user_id, role)
+SELECT 1, 'vendor'
+WHERE NOT EXISTS (SELECT 1 FROM user_roles WHERE user_id=1 AND role='vendor');
+
+-- Vendor store for user 1 (Asha)
+INSERT INTO provider_stores (owner_user_id, role, display_name, phone, city, state, pincode, status)
+VALUES (1, 'vendor', 'Asha Pet Supplies', '+919999', 'Vizag', 'AP', '530001', 'ACTIVE')
+ON CONFLICT (owner_user_id, role) DO NOTHING;
+
+-- Another vendor user + store (so parent can see “other sellers”)
+INSERT INTO users (id, phone, email, name, active_role)
+VALUES (4, '+916666', 'vendor2@example.com', 'Ravi Vendor', 'vendor')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO user_roles (user_id, role)
+VALUES (4, 'vendor')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO provider_stores (owner_user_id, role, display_name, phone, city, state, pincode, status)
+VALUES (4, 'vendor', 'Ravi Pet Mart', '+916666', 'Vizag', 'AP', '530016', 'ACTIVE')
+ON CONFLICT (owner_user_id, role) DO NOTHING;
+
+-- Grab store ids
+WITH s AS (
+  SELECT id FROM provider_stores WHERE owner_user_id=4 AND role='vendor'
+)
+INSERT INTO store_items (store_id, title, description, category, brand, image_uri, price, currency, is_active)
+SELECT s.id, 'Royal Canin Adult 2kg', 'Dry food for adult dogs', 'FOOD', 'Royal Canin',
+       'https://picsum.photos/seed/rc/300', 1299, 'INR', TRUE
+FROM s
+ON CONFLICT DO NOTHING;
+
+WITH s AS (
+  SELECT id FROM provider_stores WHERE owner_user_id=4 AND role='vendor'
+),
+it AS (
+  SELECT id AS item_id, store_id FROM store_items WHERE title='Royal Canin Adult 2kg'
+)
+INSERT INTO store_inventory (store_id, catalog_item_id, stock_qty, reorder_level)
+SELECT it.store_id, it.item_id, 25, 5 FROM it
+ON CONFLICT (store_id, catalog_item_id) DO NOTHING;

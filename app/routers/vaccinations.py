@@ -379,6 +379,7 @@ def get_vaccine_history(
 def get_due(
     mine: int = Query(1),
     limit: int = Query(3, ge=1, le=50),
+    upcoming_days: int = Query(30, ge=0, le=365),  # ✅ include upcoming window
     db: Session = Depends(get_db),
     user=Depends(require_user),
 ):
@@ -394,38 +395,41 @@ def get_due(
             _get_or_create_plan(db, int(pid))
 
     rows = db.execute(
-        text("""
-            SELECT
-              p.id AS pet_id,
-              p.name AS pet_name,
-              i.id AS plan_item_id,
+    text("""
+        SELECT
+          p.id AS pet_id,
+          p.name AS pet_name,
+          i.id AS plan_item_id,
 
-              i.vaccine_id,
-              i.vaccine_code,
-              i.vaccine_species,
-              c.name AS vaccine_name,
+          i.vaccine_id AS vaccine_id,     -- ✅ ADD THIS
+          c.code AS vaccine_code,
+          c.species AS vaccine_species,
+          c.name AS vaccine_name,
 
-              i.dose_no,
-              i.due_on,
-              CASE
-                WHEN i.completed_on IS NOT NULL THEN 'COMPLETED'
-                WHEN i.status IN ('SKIPPED','MISSED') THEN i.status
-                WHEN i.due_on <= CURRENT_DATE THEN 'DUE'
-                ELSE 'UPCOMING'
-              END AS status
-            FROM pet_vaccine_plan_item i
-            JOIN pet_vaccine_plan pl ON pl.id = i.plan_id
-            JOIN pets p ON p.id = pl.pet_id
-            JOIN vaccine_catalog c ON c.id = i.vaccine_id
-            WHERE (:mine = 0 OR p.user_id = :uid)
-              AND i.completed_on IS NULL
-              AND i.status NOT IN ('COMPLETED','SKIPPED')
-              AND i.due_on <= CURRENT_DATE
-            ORDER BY i.due_on ASC
-            LIMIT :limit
-        """),
-        {"mine": mine, "uid": user_id, "limit": limit},
-    ).mappings().all()
+          i.dose_no,
+          i.due_on,
+          CASE
+            WHEN i.completed_on IS NOT NULL THEN 'COMPLETED'
+            WHEN i.status IN ('SKIPPED','MISSED') THEN i.status
+            WHEN i.due_on <= CURRENT_DATE THEN 'DUE'
+            ELSE 'UPCOMING'
+          END AS status
+        FROM pet_vaccine_plan_item i
+        JOIN pet_vaccine_plan pl ON pl.id = i.plan_id
+        JOIN pets p ON p.id = pl.pet_id
+        JOIN vaccine_catalog c ON c.id = i.vaccine_id
+        WHERE (:mine = 0 OR p.user_id = :uid)
+          AND i.completed_on IS NULL
+          AND i.status NOT IN ('COMPLETED','SKIPPED')
+          AND i.due_on <= (CURRENT_DATE + (:upcoming_days || ' days')::interval)
+        ORDER BY
+          CASE WHEN i.due_on <= CURRENT_DATE THEN 0 ELSE 1 END,
+          i.due_on ASC
+        LIMIT :limit
+    """),
+    {"mine": mine, "uid": user_id, "limit": limit, "upcoming_days": upcoming_days},
+).mappings().all()
+
 
     return {"items": [VaccineDueItem(**dict(r)) for r in rows]}
 

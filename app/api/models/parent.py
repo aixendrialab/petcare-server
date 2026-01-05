@@ -1,17 +1,24 @@
-# app/models/parent.py
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Literal
+from datetime import date
+
+Species = Literal["dog", "cat"]
 
 class ParentPetIn(BaseModel):
+    # ✅ allow update existing
+    id: Optional[int] = None
+
     name: str
     breed: Optional[str] = None
+    species: Optional[Species] = None
+
+    # keep as string if you prefer; date also works
     dob: Optional[str] = None
     gender: Optional[str] = None
     vaccine_status: Optional[str] = None
     rewards: Optional[str] = None
     picture_uri: Optional[str] = None
 
-    # NEW FIELDS
     microchip: Optional[str] = None
     blood_group: Optional[str] = None
     is_neutered: Optional[bool] = None
@@ -27,17 +34,6 @@ class ParentProfileIn(BaseModel):
     email: Optional[str] = None
     pets: List[ParentPetIn] = Field(default_factory=list)
 
+
 class PetsUpsert(BaseModel):
-    pets: list[ParentPetIn] = Field(default_factory=list)
-
-
-class ParentUpcomingAppointment(BaseModel):
-    id: int
-    pet_id: int
-    pet_name: str
-    vet_name: str | None
-    location_name: str | None
-    start_ts: str
-    mode: str
-    slot_id: int
-    calendar_state: str
+    pets: List[ParentPetIn] = Field(default_factory=list)

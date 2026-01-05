@@ -443,3 +443,137 @@ CREATE TABLE IF NOT EXISTS vaccination_intent (
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_vacc_intent_appt ON vaccination_intent(appointment_id);
 CREATE INDEX IF NOT EXISTS ix_vacc_intent_pet ON vaccination_intent(pet_id);
+
+CREATE TABLE IF NOT EXISTS provider_stores (
+  id           SERIAL PRIMARY KEY,
+  owner_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role         TEXT NOT NULL CHECK (role IN ('vendor','pharmacist','nutritionist','hostel')),
+  display_name TEXT NOT NULL,
+  phone        TEXT,
+  email        TEXT,
+  status       TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','PENDING','SUSPENDED')),
+
+  address_line1 TEXT,
+  address_line2 TEXT,
+  city          TEXT,
+  state         TEXT,
+  pincode       TEXT,
+
+  -- pharmacy specific
+  license_no        TEXT,
+  license_valid_till DATE,
+
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  UNIQUE(owner_user_id, role)
+);
+
+CREATE INDEX IF NOT EXISTS ix_provider_stores_role ON provider_stores(role);
+CREATE INDEX IF NOT EXISTS ix_provider_stores_city ON provider_stores(city);
+
+CREATE TABLE IF NOT EXISTS store_items (
+  id         SERIAL PRIMARY KEY,
+  store_id   INTEGER NOT NULL REFERENCES provider_stores(id) ON DELETE CASCADE,
+
+  title      TEXT NOT NULL,
+  description TEXT,
+  category   TEXT NOT NULL CHECK (category IN ('FOOD','ACCESSORY','MEDICINE','SERVICE')),
+  brand      TEXT,
+  image_uri  TEXT,
+
+  price      NUMERIC(12,2) NOT NULL DEFAULT 0,
+  currency   TEXT NOT NULL DEFAULT 'INR',
+
+  is_active  BOOLEAN NOT NULL DEFAULT TRUE,
+
+  -- pharmacy use
+  prescription_required BOOLEAN NOT NULL DEFAULT FALSE,
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS ix_store_items_store ON store_items(store_id);
+CREATE INDEX IF NOT EXISTS ix_store_items_category ON store_items(category);
+CREATE INDEX IF NOT EXISTS ix_store_items_active ON store_items(is_active);
+
+CREATE TABLE IF NOT EXISTS store_inventory (
+  id            SERIAL PRIMARY KEY,
+  store_id      INTEGER NOT NULL REFERENCES provider_stores(id) ON DELETE CASCADE,
+  catalog_item_id INTEGER NOT NULL REFERENCES store_items(id) ON DELETE CASCADE,
+
+  stock_qty     INTEGER NOT NULL DEFAULT 0,
+  reorder_level INTEGER NOT NULL DEFAULT 0,
+
+  batch_no      TEXT,
+  expiry_date   DATE,
+
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  UNIQUE(store_id, catalog_item_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_store_inventory_store ON store_inventory(store_id);
+
+CREATE TABLE IF NOT EXISTS orders (
+  id            SERIAL PRIMARY KEY,
+  buyer_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  store_id      INTEGER NOT NULL REFERENCES provider_stores(id) ON DELETE RESTRICT,
+
+  status        TEXT NOT NULL DEFAULT 'CREATED'
+    CHECK (status IN ('CREATED','CONFIRMED','PACKED','DISPATCHED','DELIVERED','CANCELLED')),
+
+  total_amount  NUMERIC(12,2) NOT NULL DEFAULT 0,
+  currency      TEXT NOT NULL DEFAULT 'INR',
+
+  address_line1 TEXT,
+  address_line2 TEXT,
+  city          TEXT,
+  state         TEXT,
+  pincode       TEXT,
+
+  prescription_required BOOLEAN NOT NULL DEFAULT FALSE,
+  prescription_attached BOOLEAN NOT NULL DEFAULT FALSE,
+
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS ix_orders_store ON orders(store_id);
+CREATE INDEX IF NOT EXISTS ix_orders_buyer ON orders(buyer_user_id);
+CREATE INDEX IF NOT EXISTS ix_orders_status ON orders(status);
+
+CREATE TABLE IF NOT EXISTS order_items (
+  id            SERIAL PRIMARY KEY,
+  order_id      INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  catalog_item_id INTEGER NOT NULL REFERENCES store_items(id) ON DELETE RESTRICT,
+
+  title_snapshot TEXT NOT NULL,
+  unit_price    NUMERIC(12,2) NOT NULL,
+  qty           INTEGER NOT NULL,
+  line_total    NUMERIC(12,2) NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_order_items_order ON order_items(order_id);
+
+CREATE TABLE IF NOT EXISTS carts (
+  id            SERIAL PRIMARY KEY,
+  parent_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(parent_user_id)
+);
+
+CREATE TABLE IF NOT EXISTS cart_items (
+  id            SERIAL PRIMARY KEY,
+  cart_id       INTEGER NOT NULL REFERENCES carts(id) ON DELETE CASCADE,
+  catalog_item_id INTEGER NOT NULL REFERENCES store_items(id) ON DELETE RESTRICT,
+  qty           INTEGER NOT NULL DEFAULT 1 CHECK (qty > 0),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(cart_id, catalog_item_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_cart_items_cart ON cart_items(cart_id);
+CREATE INDEX IF NOT EXISTS ix_cart_items_catalog_item ON cart_items(catalog_item_id);

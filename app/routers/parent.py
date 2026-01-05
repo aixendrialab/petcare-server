@@ -48,7 +48,7 @@ async def get_parent_profile(uid: int = Depends(current_user_id)):
         await cur.execute(
             """
             SELECT 
-            id, name, breed, dob, gender, vaccine_status, rewards, picture_uri,
+            id, name, breed, species, dob, gender, vaccine_status, rewards, picture_uri,
             microchip, blood_group, is_neutered, allergies, chronic_conditions,
             behavior_notes, weight_kg, color_markings
             FROM pets
@@ -78,14 +78,14 @@ async def update_parent_profile(body: ParentProfileIn, uid: int = Depends(curren
             await cur.execute(
                 """
                 INSERT INTO pets (
-                user_id, name, breed, dob, gender, vaccine_status, rewards, picture_uri,
+                user_id, name, breed, species, dob, gender, vaccine_status, rewards, picture_uri,
                 microchip, blood_group, is_neutered, allergies, chronic_conditions,
                 behavior_notes, weight_kg, color_markings
                 )
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """,
                 (
-                uid, p.name, p.breed, p.dob, p.gender, p.vaccine_status, p.rewards, p.picture_uri,
+                uid, p.name, p.breed, p.species, p.dob, p.gender, p.vaccine_status, p.rewards, p.picture_uri,
                 p.microchip, p.blood_group, p.is_neutered, p.allergies, p.chronic_conditions,
                 p.behavior_notes, p.weight_kg, p.color_markings
                 ),
@@ -102,12 +102,23 @@ async def list_pets(uid: int = Depends(current_user_id)):
     async with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             """
-            SELECT id, name, breed, dob, gender, vaccine_status, rewards, picture_uri
-            FROM pets WHERE user_id=%s ORDER BY id
+            SELECT 
+              id, name, breed, species, dob, gender, vaccine_status, rewards, picture_uri,
+              microchip, blood_group, is_neutered, allergies, chronic_conditions,
+              behavior_notes, weight_kg, color_markings
+            FROM pets
+            WHERE user_id=%s
+            ORDER BY id
             """,
             (uid,),
         )
         pets = await cur.fetchall()
+
+    # optional: normalize dob to ISO string if it's a date object
+    for p in pets:
+        if p.get("dob") is not None and hasattr(p["dob"], "isoformat"):
+            p["dob"] = p["dob"].isoformat()
+
     return {"pets": pets}
 
 
@@ -121,28 +132,81 @@ async def add_pets(body: PetsUpsert, uid: int = Depends(current_user_id)):
         for p in pets:
             await cur.execute(
                 """
-                INSERT INTO pets (user_id, name, breed, dob, gender, vaccine_status, rewards, picture_uri)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO pets (user_id, name, breed, species, dob, gender, vaccine_status, rewards, picture_uri)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
-                (uid, p.name, p.breed, p.dob, p.gender, p.vaccine_status, p.rewards, p.picture_uri),
+                (uid, p.name, p.breed, p.species, p.dob, p.gender, p.vaccine_status, p.rewards, p.picture_uri),
             )
 
     return await list_pets(uid)
 
 
+# app/routers/parent.py
+
 @router.put("/pets")
-async def replace_pets(body: PetsUpsert, uid: int = Depends(current_user_id)):
-    new_pets = body.pets or []
+async def replace_pets(payload: PetsUpsert, uid: int = Depends(current_user_id)):
     async with get_conn() as conn, conn.cursor() as cur:
-        await cur.execute("DELETE FROM pets WHERE user_id=%s", (uid,))
-        for p in new_pets:
-            await cur.execute(
-                """
-                INSERT INTO pets (user_id, name, breed, dob, gender, vaccine_status, rewards, picture_uri)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (uid, p.name, p.breed, p.dob, p.gender, p.vaccine_status, p.rewards, p.picture_uri),
-            )
+        for p in payload.pets:
+            if p.id:
+                await cur.execute(
+                    """
+                    UPDATE pets
+                    SET
+                      name=%s,
+                      breed=%s,
+                      species=%s,
+                      dob=%s,
+                      gender=%s,
+                      vaccine_status=%s,
+                      rewards=%s,
+                      picture_uri=%s,
+                      microchip=%s,
+                      blood_group=%s,
+                      is_neutered=%s,
+                      allergies=%s,
+                      chronic_conditions=%s,
+                      behavior_notes=%s,
+                      weight_kg=%s,
+                      color_markings=%s
+                    WHERE id=%s AND user_id=%s
+                    """,
+                    (
+                        p.name,
+                        p.breed,
+                        p.species,
+                        p.dob,
+                        p.gender,
+                        p.vaccine_status,
+                        p.rewards,
+                        p.picture_uri,
+                        p.microchip,
+                        p.blood_group,
+                        p.is_neutered,
+                        p.allergies,
+                        p.chronic_conditions,
+                        p.behavior_notes,
+                        p.weight_kg,
+                        p.color_markings,
+                        p.id,
+                        uid,
+                    ),
+                )
+            else:
+                await cur.execute(
+                    """
+                    INSERT INTO pets (
+                      user_id, name, breed, species, dob, gender, vaccine_status, rewards, picture_uri,
+                      microchip, blood_group, is_neutered, allergies, chronic_conditions,
+                      behavior_notes, weight_kg, color_markings
+                    )
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (
+                        uid, p.name, p.breed, p.species, p.dob, p.gender, p.vaccine_status, p.rewards, p.picture_uri,
+                        p.microchip, p.blood_group, p.is_neutered, p.allergies, p.chronic_conditions,
+                        p.behavior_notes, p.weight_kg, p.color_markings,
+                    ),
+                )
 
     return await list_pets(uid)
 
@@ -169,6 +233,7 @@ async def get_pet(pet_id: int, uid: int = Depends(current_user_id)):
                 user_id,
                 name,
                 breed,
+                species,
                 dob,
                 gender,
                 vaccine_status,
@@ -206,6 +271,7 @@ async def get_pet(pet_id: int, uid: int = Depends(current_user_id)):
         "id": row["id"],
         "name": row["name"],
         "breed": row["breed"],
+        "species": row["species"],
         "sex": row["gender"],
         "ageYears": None,  # frontend calculates or optional
         "avatarUrl": row["picture_uri"],
