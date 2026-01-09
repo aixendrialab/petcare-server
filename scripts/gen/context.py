@@ -2,6 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List
+from scripts.gen.users import ensure_special_users
 
 @dataclass
 class SeedContext:
@@ -14,6 +15,10 @@ class SeedContext:
     offer_ids: List[int] = field(default_factory=list)
 
     def ensure_users(self, conn) -> List[int]:
+        special_ids, special_map = ensure_special_users(conn)
+        # store for later (optional)
+        self.special_user_ids = special_ids
+        self.special_user_phone_map = special_map
         if self.user_ids:
             return self.user_ids
         from scripts.gen.users import seed_users

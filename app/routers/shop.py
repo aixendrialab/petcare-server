@@ -473,6 +473,35 @@ async def list_products(
     )
     return {"items": _cards_from_rows(rows), "limit": limit, "offset": offset}
 
+@router.get("/shop/feed")
+async def shop_feed(
+    limit: int = Query(24, ge=1, le=60),
+    offset: int = Query(0, ge=0),
+    exclude_ids: List[int] = Query(default=[]),
+    user_id: int = Depends(current_user_id),
+):
+    """
+    Home infinite feed.
+    - Excludes already shown product ids (exclude_ids)
+    - Orders by most recent products (p.id DESC)
+    """
+    where = ["TRUE"]
+    params: List[Any] = []
+
+    if exclude_ids:
+        # PostgreSQL: p.id != ALL(array) means p.id not equal to every element
+        where.append("p.id != ALL(%s)")
+        params.append(exclude_ids)
+
+    rows = await _product_card_rows(
+        where_sql=" AND ".join(where),
+        params=tuple(params),
+        order_sql="ORDER BY p.id DESC",
+        limit=limit,
+        offset=offset,
+    )
+    return {"items": _cards_from_rows(rows), "limit": limit, "offset": offset}
+
 # -----------------------------
 # Product detail (PDP)
 # -----------------------------

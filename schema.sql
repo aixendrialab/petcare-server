@@ -996,3 +996,10 @@ CREATE TABLE user_item_events (
 
 CREATE INDEX ix_events_product_time ON user_item_events(product_id, created_at DESC);
 CREATE INDEX ix_events_user_time ON user_item_events(user_id, created_at DESC);
+
+ALTER TABLE vet_profiles
+DROP CONSTRAINT vet_profiles_slot_minutes_check;
+
+ALTER TABLE vet_profiles
+ADD CONSTRAINT vet_profiles_slot_minutes_check
+CHECK (slot_minutes > 0);
