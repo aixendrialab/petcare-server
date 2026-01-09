@@ -1,110 +1,195 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import Optional, List, Literal
 from app.routers.security import current_user_id
 from app.core.db import get_conn
 
 router = APIRouter()
 
-class CheckoutItemIn(BaseModel):
-    catalog_item_id: int
-    qty: int
+OrderStatus = Literal["CREATED","CONFIRMED","PACKED","DISPATCHED","DELIVERED","CANCELLED"]
 
 class CheckoutIn(BaseModel):
-    store_id: int
-    items: List[CheckoutItemIn]
-    address_line1: Optional[str] = None
-    address_line2: Optional[str] = None
-    city: Optional[str] = None
-    state: Optional[str] = None
-    pincode: Optional[str] = None
+    address_id: int  # required
 
-class OrderItemIn(BaseModel):
-    catalog_item_id: int
-    qty: int
-
-class PlaceOrderIn(BaseModel):
-    provider_id: int
-    items: List[CheckoutItemIn]
-    prescription_id: Optional[int] = None
-    rx_uri: Optional[str] = None
-
-    address_line1: Optional[str] = None
-    address_line2: Optional[str] = None
-    city: Optional[str] = None
-    state: Optional[str] = None
-    pincode: Optional[str] = None
-    
 @router.post("/orders/checkout")
 async def checkout(body: CheckoutIn, user_id: int = Depends(current_user_id)):
-    if not body.items:
-        raise HTTPException(400, "No items")
-
     async with get_conn() as conn, conn.cursor() as cur:
-        # Load item prices + title
-        ids = [it.catalog_item_id for it in body.items]
+        # cart exists
+        await cur.execute("SELECT id FROM carts WHERE parent_user_id=%s", (user_id,))
+        r = await cur.fetchone()
+        if not r:
+            raise HTTPException(400, "Cart not found")
+        cart_id = int(r[0])
+
+        # validate address
+        await cur.execute("SELECT id FROM user_addresses WHERE id=%s AND user_id=%s", (body.address_id, user_id))
+        if not await cur.fetchone():
+            raise HTTPException(400, "Invalid address")
+
+        # load cart items with offer/product/tax
         await cur.execute(
-            f"""SELECT id, title, price, currency, prescription_required
-                FROM store_items
-                WHERE store_id=%s AND id = ANY(%s) AND is_active=TRUE""",
-            (body.store_id, ids),
+            """
+            SELECT
+              ci.id as cart_item_id,
+              ci.qty,
+              so.id as offer_id,
+              so.store_id,
+              so.currency, so.price, so.mrp, so.discount_pct,
+              so.shipping_fee,
+              so.stock_qty,
+              sku.id as sku_id,
+              p.id as product_id,
+              p.title,
+              p.tax_class,
+              tc.gst_pct
+            FROM cart_items ci
+            JOIN store_offers so ON so.id=ci.store_offer_id AND so.is_active=TRUE
+            JOIN catalog_skus sku ON sku.id=so.sku_id
+            JOIN catalog_products p ON p.id=sku.product_id
+            LEFT JOIN tax_classes tc ON tc.code=p.tax_class
+            WHERE ci.cart_id=%s
+            ORDER BY so.store_id, ci.id
+            """,
+            (cart_id,),
         )
         rows = await cur.fetchall()
-        by_id = {r[0]: r for r in rows}
-        if len(by_id) != len(ids):
-            raise HTTPException(400, "Some items are invalid/inactive")
+        if not rows:
+            raise HTTPException(400, "Cart is empty")
 
-        total = 0.0
-        currency = rows[0][3] if rows else "INR"
-        rx_required = any(bool(by_id[i][4]) for i in ids)
+        # group by store_id -> one order per store
+        by_store: dict[int, list] = {}
+        for row in rows:
+            store_id = int(row[3])
+            by_store.setdefault(store_id, []).append(row)
 
-        await cur.execute(
-            """INSERT INTO orders
-               (buyer_user_id, store_id, status, total_amount, currency,
-                address_line1, address_line2, city, state, pincode,
-                prescription_required, prescription_attached)
-               VALUES (%s,%s,'CREATED',%s,%s,%s,%s,%s,%s,%s,%s,FALSE)
-               RETURNING id""",
-            (user_id, body.store_id, total, currency,
-             body.address_line1, body.address_line2, body.city, body.state, body.pincode,
-             rx_required),
-        )
-        order_id = (await cur.fetchone())[0]
+        created_orders: List[int] = []
 
-        # Insert items + compute totals
-        for it in body.items:
-            _, title, price, _, _ = by_id[it.catalog_item_id]
-            line_total = float(price) * int(it.qty)
-            total += line_total
+        for store_id, items in by_store.items():
+            currency = items[0][4] or "INR"
+
+            items_total = 0.0
+            discount_total = 0.0
+            shipping_fee = 0.0
+            tax_total = 0.0
+
+            # create order placeholder
             await cur.execute(
-                """INSERT INTO order_items (order_id, catalog_item_id, title_snapshot, unit_price, qty, line_total)
-                   VALUES (%s,%s,%s,%s,%s,%s)""",
-                (order_id, it.catalog_item_id, title, price, it.qty, line_total),
+                """
+                INSERT INTO orders
+                  (parent_user_id, store_id, address_id, status, currency,
+                   items_total, discount_total, shipping_fee, tax_total, grand_total)
+                VALUES
+                  (%s,%s,%s,'CREATED',%s,0,0,0,0,0)
+                RETURNING id
+                """,
+                (user_id, store_id, body.address_id, currency),
+            )
+            order_id = int((await cur.fetchone())[0])
+            created_orders.append(order_id)
+
+            for row in items:
+                cart_item_id, qty, offer_id, _store_id, currency, price, mrp, dpct, ship_fee, stock_qty, sku_id, product_id, title, tax_class, gst_pct = row
+                qty = int(qty)
+
+                if int(stock_qty or 0) < qty:
+                    raise HTTPException(400, f"Out of stock for offer_id={offer_id}")
+
+                unit_price = float(price)
+                line = unit_price * qty
+                items_total += line
+
+                # discount from mrp if present
+                disc_amt = 0.0
+                if mrp is not None and float(mrp) > unit_price:
+                    disc_amt = (float(mrp) - unit_price) * qty
+                    discount_total += disc_amt
+
+                # tax
+                g = float(gst_pct or 0.0)
+                gst_amt = line * g / 100.0
+                tax_total += gst_amt
+
+                # shipping fee at order-level: max of offer shipping_fee
+                if ship_fee is not None:
+                    shipping_fee = max(shipping_fee, float(ship_fee))
+
+                variant_snapshot = None  # can be filled via sku fields later
+                await cur.execute(
+                    """
+                    INSERT INTO order_items
+                      (order_id, store_offer_id, sku_id, product_id,
+                       title_snapshot, variant_snapshot, qty,
+                       unit_price, mrp, discount_amt, gst_pct, gst_amt, line_total)
+                    VALUES
+                      (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (
+                        order_id, offer_id, sku_id, product_id,
+                        title, variant_snapshot, qty,
+                        unit_price, float(mrp) if mrp is not None else None, disc_amt,
+                        g, gst_amt, line
+                    ),
+                )
+
+                # decrement stock
+                await cur.execute(
+                    "UPDATE store_offers SET stock_qty = GREATEST(stock_qty - %s, 0), updated_at=now() WHERE id=%s",
+                    (qty, offer_id),
+                )
+
+            grand_total = items_total - discount_total + shipping_fee + tax_total
+
+            await cur.execute(
+                """
+                UPDATE orders SET
+                  items_total=%s,
+                  discount_total=%s,
+                  shipping_fee=%s,
+                  tax_total=%s,
+                  grand_total=%s
+                WHERE id=%s
+                """,
+                (items_total, discount_total, shipping_fee, tax_total, grand_total, order_id),
             )
 
-        await cur.execute("UPDATE orders SET total_amount=%s, updated_at=now() WHERE id=%s", (total, order_id))
+        # clear cart
+        await cur.execute("DELETE FROM cart_items WHERE cart_id=%s", (cart_id,))
 
-    return {"ok": True, "order_id": order_id}
+    return {"ok": True, "order_ids": created_orders}
 
 @router.get("/orders")
-async def my_orders(mine: int = 1, user_id: int = Depends(current_user_id)):
+async def my_orders(mine: int = Query(1), user_id: int = Depends(current_user_id)):
+    if int(mine) != 1:
+        raise HTTPException(400, "Use mine=1")
     async with get_conn() as conn, conn.cursor() as cur:
         await cur.execute(
-            """SELECT id, store_id, status, total_amount, currency, created_at
-               FROM orders WHERE buyer_user_id=%s ORDER BY id DESC""",
+            """
+            SELECT o.id, o.store_id, ps.display_name, o.status,
+                   o.grand_total, o.currency, o.created_at
+            FROM orders o
+            JOIN provider_stores ps ON ps.id=o.store_id
+            WHERE o.parent_user_id=%s
+            ORDER BY o.id DESC
+            """,
             (user_id,),
         )
         rows = await cur.fetchall()
-    keys = ["id","store_id","status","total_amount","currency","created_at"]
+    keys = ["id","store_id","store_name","status","grand_total","currency","created_at"]
     return {"items": [dict(zip(keys, r)) for r in rows]}
 
 @router.get("/orders/{order_id}")
 async def order_detail(order_id: int, user_id: int = Depends(current_user_id)):
     async with get_conn() as conn, conn.cursor() as cur:
         await cur.execute(
-            """SELECT id, buyer_user_id, store_id, status, total_amount, currency, created_at,
-                      address_line1, address_line2, city, state, pincode
-               FROM orders WHERE id=%s AND buyer_user_id=%s""",
+            """
+            SELECT o.id, o.parent_user_id, o.store_id, ps.display_name, o.status, o.created_at,
+                   o.currency, o.items_total, o.discount_total, o.shipping_fee, o.tax_total, o.grand_total,
+                   a.label, a.recipient, a.phone, a.line1, a.line2, a.landmark, a.city, a.state, a.pincode
+            FROM orders o
+            JOIN provider_stores ps ON ps.id=o.store_id
+            JOIN user_addresses a ON a.id=o.address_id
+            WHERE o.id=%s AND o.parent_user_id=%s
+            """,
             (order_id, user_id),
         )
         o = await cur.fetchone()
@@ -112,86 +197,100 @@ async def order_detail(order_id: int, user_id: int = Depends(current_user_id)):
             raise HTTPException(404, "Order not found")
 
         await cur.execute(
-            """SELECT catalog_item_id, title_snapshot, unit_price, qty, line_total
-               FROM order_items WHERE order_id=%s ORDER BY id""",
+            """
+            SELECT oi.product_id, oi.sku_id, oi.qty, oi.unit_price, oi.mrp, oi.discount_amt, oi.gst_pct, oi.gst_amt, oi.line_total,
+                   oi.title_snapshot
+            FROM order_items oi
+            WHERE oi.order_id=%s
+            ORDER BY oi.id
+            """,
             (order_id,),
         )
         items = await cur.fetchall()
 
-    okeys = ["id","buyer_user_id","store_id","status","total_amount","currency","created_at",
-             "address_line1","address_line2","city","state","pincode"]
-    ikeys = ["catalog_item_id","title","unit_price","qty","line_total"]
-    return {"order": dict(zip(okeys, o)), "items": [dict(zip(ikeys, r)) for r in items]}
+    order = {
+        "id": o[0],
+        "store": {"id": o[2], "display_name": o[3]},
+        "status": o[4],
+        "created_at": o[5].isoformat() if hasattr(o[5], "isoformat") else str(o[5]),
+        "currency": o[6],
+        "totals": {
+            "items_total": float(o[7]),
+            "discount_total": float(o[8]),
+            "shipping_fee": float(o[9]),
+            "tax_total": float(o[10]),
+            "grand_total": float(o[11]),
+        },
+        "address": {
+            "label": o[12], "recipient": o[13], "phone": o[14],
+            "line1": o[15], "line2": o[16], "landmark": o[17],
+            "city": o[18], "state": o[19], "pincode": o[20],
+        },
+        "items": [],
+    }
 
+    for r in items:
+        (product_id, sku_id, qty, unit_price, mrp, disc, gst_pct, gst_amt, line_total, title) = r
+        order["items"].append({
+            "product_id": int(product_id),
+            "sku_id": int(sku_id),
+            "title": title,
+            "qty": int(qty),
+            "unit_price": float(unit_price),
+            "mrp": float(mrp) if mrp is not None else None,
+            "discount_amt": float(disc),
+            "gst_pct": float(gst_pct),
+            "gst_amt": float(gst_amt),
+            "line_total": float(line_total),
+        })
 
-@router.post("/orders")
-async def place_order(body: PlaceOrderIn, user_id: int = Depends(current_user_id)):
-    if not body.items:
-        raise HTTPException(400, "No items")
+    return {"order": order}
 
-    store_id = body.provider_id  # your UI uses provider_id; DB uses store_id
+# --------------------------
+# Provider ops
+# --------------------------
 
+ProviderRole = Literal["vendor","pharmacist","nutritionist","hostel"]
+
+async def _my_store_id(user_id: int, role: str) -> int:
     async with get_conn() as conn, conn.cursor() as cur:
-        # 1) Load catalog items (price, title, currency, rx flag)
-        ids = [it.catalog_item_id for it in body.items]
+        await cur.execute(
+            "SELECT id FROM provider_stores WHERE owner_user_id=%s AND role=%s",
+            (user_id, role),
+        )
+        row = await cur.fetchone()
+        if not row:
+            raise HTTPException(400, f"No store profile for role={role}. Complete onboarding first.")
+        return int(row[0])
 
+@router.get("/provider/orders")
+async def provider_orders(role: ProviderRole = Query(...), user_id: int = Depends(current_user_id)):
+    store_id = await _my_store_id(user_id, role)
+    async with get_conn() as conn, conn.cursor() as cur:
         await cur.execute(
             """
-            SELECT id, title, price, currency, prescription_required
-            FROM store_items
-            WHERE store_id=%s AND id = ANY(%s) AND is_active=TRUE
+            SELECT o.id, o.parent_user_id, o.status, o.grand_total, o.currency, o.created_at
+            FROM orders o
+            WHERE o.store_id=%s
+            ORDER BY o.id DESC
             """,
-            (store_id, ids),
+            (store_id,),
         )
         rows = await cur.fetchall()
-        by_id = {r[0]: r for r in rows}
+    keys = ["id","parent_user_id","status","grand_total","currency","created_at"]
+    return {"items": [dict(zip(keys, r)) for r in rows]}
 
-        if len(by_id) != len(ids):
-            raise HTTPException(400, "Some items are invalid/inactive")
+class StatusIn(BaseModel):
+    status: OrderStatus
 
-        currency = rows[0][3] if rows else "INR"
-        rx_required = any(bool(by_id[i][4]) for i in ids)
-
-        # 2) Create order with placeholder total 0 first
+@router.patch("/provider/orders/{order_id}/status")
+async def set_provider_order_status(order_id: int, role: ProviderRole = Query(...), body: StatusIn = None, user_id: int = Depends(current_user_id)):
+    store_id = await _my_store_id(user_id, role)
+    async with get_conn() as conn, conn.cursor() as cur:
         await cur.execute(
-            """
-            INSERT INTO orders
-              (buyer_user_id, store_id, status, total_amount, currency,
-               prescription_required, prescription_attached)
-            VALUES
-              (%s, %s, 'CREATED', %s, %s, %s, %s)
-            RETURNING id
-            """,
-            (user_id, store_id, 0.0, currency, rx_required, False),
+            "UPDATE orders SET status=%s WHERE id=%s AND store_id=%s RETURNING id",
+            (body.status, order_id, store_id),
         )
-        order_id = (await cur.fetchone())[0]
-
-        # 3) Insert order items and compute total
-        total = 0.0
-        for it in body.items:
-            _, title, price, _, _rx = by_id[it.catalog_item_id]
-            qty = int(it.qty)
-            unit_price = float(price)
-            line_total = unit_price * qty
-            total += line_total
-
-            await cur.execute(
-                """
-                INSERT INTO order_items
-                  (order_id, catalog_item_id, title_snapshot, unit_price, qty, line_total)
-                VALUES
-                  (%s, %s, %s, %s, %s, %s)
-                """,
-                (order_id, it.catalog_item_id, title, unit_price, qty, line_total),
-            )
-
-        # 4) Update order total
-        await cur.execute(
-            "UPDATE orders SET total_amount=%s, updated_at=now() WHERE id=%s",
-            (total, order_id),
-        )
-
-        # Optional: clear cart after placing (if you have cart tables)
-        # await cur.execute("DELETE FROM cart_items WHERE buyer_user_id=%s AND store_id=%s", (user_id, store_id))
-
-    return {"order_id": order_id}
+        if not await cur.fetchone():
+            raise HTTPException(404, "Order not found")
+    return {"ok": True}

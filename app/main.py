@@ -1,10 +1,8 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.db import init_pool, close_pool
-from .routers import appointments, lot_d, auth, uploads, vet,parent, vet_schedule, consult, vaccinations, providers, store, shop, orders, cart
-from app.routers.slot_settings import router as slot_settings_router  
+from app.routers import addresses, qa, reviews, vendor, appointments, lot_d, auth, uploads, vet,parent, vet_schedule, consult, vaccinations, providers, store, shop, orders, cart, slot_settings, wishlist
 from fastapi.staticfiles import StaticFiles
-from app.api.models import Base
 
 import json
 import logging
@@ -78,13 +76,19 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 app.include_router(vet.router, prefix="/api/v1/vet", tags=["vet"])
 app.include_router(vet_schedule.router, prefix="/api/v1", tags=["vet"])
 app.include_router(parent.router, prefix="/api/v1/parents", tags=["parent"])
-app.include_router(slot_settings_router)                  # router already has prefix="/api/v1"
+app.include_router(slot_settings.router)                  # router already has prefix="/api/v1"
 app.include_router(appointments.router, prefix="/api/v1/appointments", tags=["appointments"])
 app.include_router(consult.router, prefix="/api/v1")
 app.include_router(vaccinations.router, prefix="/api/v1/vaccines", tags=["vaccines"])
 
+app.include_router(addresses.router, prefix="/api/v1", tags=["addresses"])
 app.include_router(providers.router, prefix="/api/v1", tags=["providers"])
 app.include_router(store.router, prefix="/api/v1", tags=["store"])
 app.include_router(shop.router, prefix="/api/v1", tags=["shop"])
 app.include_router(orders.router, prefix="/api/v1", tags=["orders"])
 app.include_router(cart.router, prefix="/api/v1", tags=["cart"])
+app.include_router(vendor.router, prefix="/api/v1", tags=["vendor"])
+
+app.include_router(reviews.router, prefix="/api/v1")
+app.include_router(qa.router, prefix="/api/v1")
+app.include_router(wishlist.router, prefix="/api/v1")

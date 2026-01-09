@@ -288,18 +288,22 @@ ALTER TABLE pets ADD COLUMN IF NOT EXISTS species TEXT CHECK (species IN ('dog',
 
 -- 1) Master catalog
 CREATE TABLE IF NOT EXISTS vaccine_catalog (
+  id          SERIAL PRIMARY KEY,
+
   code        TEXT NOT NULL,  -- 'RABIES', 'DHPP', 'FVRCP', 'FELV'
   species     TEXT NOT NULL CHECK (species IN ('dog','cat')),
-  name        TEXT NOT NULL,  -- display name
+  name        TEXT NOT NULL,
   vaccine_type TEXT NOT NULL DEFAULT 'core' CHECK (vaccine_type IN ('core','optional')),
   description TEXT,
-  is_active   BOOLEAN NOT NULL DEFAULT TRUE,
-
-  PRIMARY KEY (code, species)
+  is_active   BOOLEAN NOT NULL DEFAULT TRUE
 );
 
--- Helpful index for browsing
-CREATE INDEX IF NOT EXISTS ix_vaccine_catalog_species ON vaccine_catalog(species);
+-- unique business key
+CREATE UNIQUE INDEX IF NOT EXISTS uq_vaccine_catalog_code_species
+  ON vaccine_catalog(code, species);
+
+CREATE INDEX IF NOT EXISTS ix_vaccine_catalog_species
+  ON vaccine_catalog(species);
 
 
 -- 2) Vaccination history/record (actual administered doses)
@@ -307,10 +311,9 @@ CREATE TABLE IF NOT EXISTS vaccination_record (
   id             SERIAL PRIMARY KEY,
   pet_id         INTEGER NOT NULL REFERENCES pets(id) ON DELETE CASCADE,
 
-  vaccine_code   TEXT NOT NULL,
-  vaccine_species TEXT NOT NULL CHECK (vaccine_species IN ('dog','cat')),
+  vaccine_id     INT NOT NULL REFERENCES vaccine_catalog(id) ON DELETE RESTRICT,
 
-  vaccine_type   TEXT,              -- core / optional (can store snapshot for history)
+  vaccine_type   TEXT,            -- optional snapshot
   last_given     DATE,
   next_due       DATE,
 
@@ -322,12 +325,7 @@ CREATE TABLE IF NOT EXISTS vaccination_record (
   location_id    INTEGER REFERENCES vet_locations(id),
 
   created_at     TIMESTAMP DEFAULT now(),
-  updated_at     TIMESTAMP DEFAULT now(),
-
-  CONSTRAINT fk_vacc_record_catalog
-    FOREIGN KEY (vaccine_code, vaccine_species)
-    REFERENCES vaccine_catalog(code, species)
-    ON DELETE RESTRICT
+  updated_at     TIMESTAMP DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS ix_vacc_record_pet ON vaccination_record(pet_id);
@@ -340,28 +338,18 @@ CREATE TABLE IF NOT EXISTS vaccine_rule (
 
   species               TEXT NOT NULL CHECK (species IN ('dog','cat')),
 
-  vaccine_code          TEXT NOT NULL,
-  vaccine_species       TEXT NOT NULL CHECK (vaccine_species IN ('dog','cat')),
+  vaccine_id            INT NOT NULL REFERENCES vaccine_catalog(id) ON DELETE CASCADE,
 
-  -- schedule recipe (simple)
   start_age_weeks       INT NULL,
   dose_count            INT NOT NULL DEFAULT 1,
   dose_interval_days    INT NOT NULL DEFAULT 21,
   booster_interval_days INT NULL,
 
-  is_active             BOOLEAN NOT NULL DEFAULT TRUE,
-
-  CONSTRAINT ck_vaccine_rule_species_match
-    CHECK (species = vaccine_species),
-
-  CONSTRAINT fk_vaccine_rule_catalog
-    FOREIGN KEY (vaccine_code, vaccine_species)
-    REFERENCES vaccine_catalog(code, species)
-    ON DELETE CASCADE
+  is_active             BOOLEAN NOT NULL DEFAULT TRUE
 );
 
 CREATE INDEX IF NOT EXISTS ix_vaccine_rule_species ON vaccine_rule(species);
-CREATE INDEX IF NOT EXISTS ix_vaccine_rule_vaccine ON vaccine_rule(vaccine_code, vaccine_species);
+CREATE INDEX IF NOT EXISTS ix_vaccine_rule_vaccine_id ON vaccine_rule(vaccine_id);
 
 
 -- 4) One plan per pet (generated / confirmed)
@@ -387,8 +375,7 @@ CREATE TABLE IF NOT EXISTS pet_vaccine_plan_item (
   id SERIAL PRIMARY KEY,
   plan_id INT NOT NULL REFERENCES pet_vaccine_plan(id) ON DELETE CASCADE,
 
-  vaccine_code    TEXT NOT NULL,
-  vaccine_species TEXT NOT NULL CHECK (vaccine_species IN ('dog','cat')),
+  vaccine_id INT NOT NULL REFERENCES vaccine_catalog(id) ON DELETE RESTRICT,
 
   dose_no INT NOT NULL DEFAULT 1,
   due_on  DATE NOT NULL,
@@ -400,16 +387,12 @@ CREATE TABLE IF NOT EXISTS pet_vaccine_plan_item (
   completed_record_id INT NULL REFERENCES vaccination_record(id),
 
   overridden BOOLEAN NOT NULL DEFAULT FALSE,
-  override_reason TEXT NULL,
-
-  CONSTRAINT fk_plan_item_catalog
-    FOREIGN KEY (vaccine_code, vaccine_species)
-    REFERENCES vaccine_catalog(code, species)
-    ON DELETE RESTRICT
+  override_reason TEXT NULL
 );
 
 CREATE INDEX IF NOT EXISTS ix_plan_item_due ON pet_vaccine_plan_item(due_on, status);
 CREATE INDEX IF NOT EXISTS ix_plan_item_plan ON pet_vaccine_plan_item(plan_id);
+CREATE INDEX IF NOT EXISTS ix_plan_item_vaccine ON pet_vaccine_plan_item(vaccine_id);
 
 
 -- 6) Appointment-level intent (parent requests vaccine action during consult)
@@ -443,15 +426,79 @@ CREATE TABLE IF NOT EXISTS vaccination_intent (
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_vacc_intent_appt ON vaccination_intent(appointment_id);
 CREATE INDEX IF NOT EXISTS ix_vacc_intent_pet ON vaccination_intent(pet_id);
+-- =========================================================
+-- COMMERCE SCHEMA v2 (DROP + CREATE)
+-- Goal: Amazon-like PDP + recos + variants + seller store page
+-- =========================================================
 
-CREATE TABLE IF NOT EXISTS provider_stores (
+-- ---------------------------------------------------------
+-- Updated-at trigger helper (keep as-is)
+-- ---------------------------------------------------------
+CREATE OR REPLACE FUNCTION trg_touch_updated_at() RETURNS trigger AS $$
+BEGIN
+  NEW.updated_at := now();
+  RETURN NEW;
+END$$ LANGUAGE plpgsql;
+
+-- =========================================================
+-- 1) DELIVERY ADDRESSES
+-- =========================================================
+DROP TABLE IF EXISTS user_addresses CASCADE;
+
+CREATE TABLE user_addresses (
   id           SERIAL PRIMARY KEY,
-  owner_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  role         TEXT NOT NULL CHECK (role IN ('vendor','pharmacist','nutritionist','hostel')),
-  display_name TEXT NOT NULL,
+  user_id      INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+
+  label        TEXT,              -- "Home", "Office"
+  recipient    TEXT NOT NULL,
   phone        TEXT,
-  email        TEXT,
-  status       TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','PENDING','SUSPENDED')),
+
+  line1        TEXT NOT NULL,
+  line2        TEXT,
+  landmark     TEXT,
+  city         TEXT NOT NULL,
+  state        TEXT NOT NULL,
+  pincode      TEXT NOT NULL,
+
+  lat          DOUBLE PRECISION,
+  lng          DOUBLE PRECISION,
+
+  is_default   BOOLEAN NOT NULL DEFAULT FALSE,
+
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX ix_user_addresses_user ON user_addresses(user_id);
+CREATE UNIQUE INDEX ux_user_default_address ON user_addresses(user_id) WHERE is_default = TRUE;
+
+DROP TRIGGER IF EXISTS touch_user_addresses ON user_addresses;
+CREATE TRIGGER touch_user_addresses
+BEFORE UPDATE ON user_addresses
+FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
+
+
+-- =========================================================
+-- 2) STORES (SELLERS)
+-- =========================================================
+DROP TABLE IF EXISTS store_badges CASCADE;
+DROP TABLE IF EXISTS provider_stores CASCADE;
+
+CREATE TABLE provider_stores (
+  id            SERIAL PRIMARY KEY,
+  owner_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+
+  role          TEXT NOT NULL CHECK (role IN ('vendor','pharmacist','nutritionist','hostel')),
+  display_name  TEXT NOT NULL,
+
+  phone         TEXT,
+  email         TEXT,
+
+  logo_uri      TEXT,
+  about         TEXT,
+
+  status        TEXT NOT NULL DEFAULT 'ACTIVE'
+    CHECK (status IN ('ACTIVE','PENDING','SUSPENDED')),
 
   address_line1 TEXT,
   address_line2 TEXT,
@@ -460,120 +507,492 @@ CREATE TABLE IF NOT EXISTS provider_stores (
   pincode       TEXT,
 
   -- pharmacy specific
-  license_no        TEXT,
+  license_no         TEXT,
   license_valid_till DATE,
 
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- cached store metrics (optional)
+  rating_avg   NUMERIC(3,2),
+  rating_count INT,
+  orders_30d   INT,
+
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
 
   UNIQUE(owner_user_id, role)
 );
 
-CREATE INDEX IF NOT EXISTS ix_provider_stores_role ON provider_stores(role);
-CREATE INDEX IF NOT EXISTS ix_provider_stores_city ON provider_stores(city);
+CREATE INDEX ix_provider_stores_role ON provider_stores(role);
+CREATE INDEX ix_provider_stores_city ON provider_stores(city);
 
-CREATE TABLE IF NOT EXISTS store_items (
-  id         SERIAL PRIMARY KEY,
-  store_id   INTEGER NOT NULL REFERENCES provider_stores(id) ON DELETE CASCADE,
+DROP TRIGGER IF EXISTS touch_provider_stores ON provider_stores;
+CREATE TRIGGER touch_provider_stores
+BEFORE UPDATE ON provider_stores
+FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
 
-  title      TEXT NOT NULL,
-  description TEXT,
-  category   TEXT NOT NULL CHECK (category IN ('FOOD','ACCESSORY','MEDICINE','SERVICE')),
-  brand      TEXT,
-  image_uri  TEXT,
-
-  price      NUMERIC(12,2) NOT NULL DEFAULT 0,
-  currency   TEXT NOT NULL DEFAULT 'INR',
-
-  is_active  BOOLEAN NOT NULL DEFAULT TRUE,
-
-  -- pharmacy use
-  prescription_required BOOLEAN NOT NULL DEFAULT FALSE,
-
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE TABLE store_badges (
+  id SERIAL PRIMARY KEY,
+  store_id INT NOT NULL REFERENCES provider_stores(id) ON DELETE CASCADE,
+  badge TEXT NOT NULL,
+  UNIQUE(store_id, badge)
 );
 
-CREATE INDEX IF NOT EXISTS ix_store_items_store ON store_items(store_id);
-CREATE INDEX IF NOT EXISTS ix_store_items_category ON store_items(category);
-CREATE INDEX IF NOT EXISTS ix_store_items_active ON store_items(is_active);
+CREATE INDEX ix_store_badges_store ON store_badges(store_id);
 
-CREATE TABLE IF NOT EXISTS store_inventory (
-  id            SERIAL PRIMARY KEY,
-  store_id      INTEGER NOT NULL REFERENCES provider_stores(id) ON DELETE CASCADE,
-  catalog_item_id INTEGER NOT NULL REFERENCES store_items(id) ON DELETE CASCADE,
 
-  stock_qty     INTEGER NOT NULL DEFAULT 0,
-  reorder_level INTEGER NOT NULL DEFAULT 0,
+-- =========================================================
+-- 3) BRANDS
+-- =========================================================
+DROP TABLE IF EXISTS brands CASCADE;
 
-  batch_no      TEXT,
-  expiry_date   DATE,
-
-  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-  UNIQUE(store_id, catalog_item_id)
+CREATE TABLE brands (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  about TEXT,
+  logo_uri TEXT,
+  website TEXT
 );
 
-CREATE INDEX IF NOT EXISTS ix_store_inventory_store ON store_inventory(store_id);
 
-CREATE TABLE IF NOT EXISTS orders (
+-- =========================================================
+-- 4) TAX / GST
+-- =========================================================
+DROP TABLE IF EXISTS tax_classes CASCADE;
+
+CREATE TABLE tax_classes (
+  code TEXT PRIMARY KEY,                 -- e.g. GST_0, GST_5, GST_12, GST_18
+  gst_pct NUMERIC(5,2) NOT NULL CHECK (gst_pct >= 0),
+  description TEXT
+);
+
+
+-- =========================================================
+-- 5) CATALOG: PRODUCTS + SKUS (VARIANTS)
+-- =========================================================
+DROP TABLE IF EXISTS product_tags CASCADE;
+DROP TABLE IF EXISTS product_media CASCADE;
+DROP TABLE IF EXISTS product_specs CASCADE;
+DROP TABLE IF EXISTS catalog_skus CASCADE;
+DROP TABLE IF EXISTS catalog_products CASCADE;
+
+CREATE TABLE catalog_products (
   id            SERIAL PRIMARY KEY,
-  buyer_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  store_id      INTEGER NOT NULL REFERENCES provider_stores(id) ON DELETE RESTRICT,
 
-  status        TEXT NOT NULL DEFAULT 'CREATED'
-    CHECK (status IN ('CREATED','CONFIRMED','PACKED','DISPATCHED','DELIVERED','CANCELLED')),
+  category      TEXT NOT NULL CHECK (category IN ('FOOD','ACCESSORY','MEDICINE','SERVICE')),
+  brand_id      INT REFERENCES brands(id) ON DELETE SET NULL,
+  brand_text    TEXT,  -- fallback if no brand row
 
-  total_amount  NUMERIC(12,2) NOT NULL DEFAULT 0,
-  currency      TEXT NOT NULL DEFAULT 'INR',
-
-  address_line1 TEXT,
-  address_line2 TEXT,
-  city          TEXT,
-  state         TEXT,
-  pincode       TEXT,
+  title         TEXT NOT NULL,
+  short_desc    TEXT,         -- bullet-ish short copy
+  description   TEXT,         -- long description
+  about_brand   TEXT,         -- override if needed (else from brands.about)
 
   prescription_required BOOLEAN NOT NULL DEFAULT FALSE,
-  prescription_attached BOOLEAN NOT NULL DEFAULT FALSE,
+
+  -- tax classification
+  hsn_code      TEXT,
+  tax_class     TEXT REFERENCES tax_classes(code),
+
+  -- variant theme hints (optional)
+  variant_theme TEXT,         -- "Color", "Size", "Flavour"
+  is_active     BOOLEAN NOT NULL DEFAULT TRUE,
 
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS ix_orders_store ON orders(store_id);
-CREATE INDEX IF NOT EXISTS ix_orders_buyer ON orders(buyer_user_id);
-CREATE INDEX IF NOT EXISTS ix_orders_status ON orders(status);
+CREATE INDEX ix_catalog_products_category ON catalog_products(category);
+CREATE INDEX ix_catalog_products_brand_id ON catalog_products(brand_id);
+CREATE INDEX ix_catalog_products_active ON catalog_products(is_active);
 
-CREATE TABLE IF NOT EXISTS order_items (
+DROP TRIGGER IF EXISTS touch_catalog_products ON catalog_products;
+CREATE TRIGGER touch_catalog_products
+BEFORE UPDATE ON catalog_products
+FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
+
+
+-- One row per purchasable variant (SKU)
+CREATE TABLE catalog_skus (
   id            SERIAL PRIMARY KEY,
-  order_id      INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
-  catalog_item_id INTEGER NOT NULL REFERENCES store_items(id) ON DELETE RESTRICT,
+  product_id    INT NOT NULL REFERENCES catalog_products(id) ON DELETE CASCADE,
 
-  title_snapshot TEXT NOT NULL,
-  unit_price    NUMERIC(12,2) NOT NULL,
-  qty           INTEGER NOT NULL,
-  line_total    NUMERIC(12,2) NOT NULL
+  variant_key   TEXT,         -- "Color"
+  variant_value TEXT,         -- "Yellow"
+  pack_label    TEXT,         -- "900ml", "1.1kg", "Pack of 12"
+
+  sku_code      TEXT UNIQUE,
+  barcode       TEXT,
+
+  sort_order    INT NOT NULL DEFAULT 0,
+  is_active     BOOLEAN NOT NULL DEFAULT TRUE,
+
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS ix_order_items_order ON order_items(order_id);
+CREATE INDEX ix_skus_product ON catalog_skus(product_id, sort_order);
+CREATE INDEX ix_skus_variant ON catalog_skus(product_id, variant_key, sort_order);
+CREATE INDEX ix_skus_active ON catalog_skus(is_active);
 
-CREATE TABLE IF NOT EXISTS carts (
-  id            SERIAL PRIMARY KEY,
-  parent_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+-- Product images/videos (PDP carousel)
+CREATE TABLE product_media (
+  id         SERIAL PRIMARY KEY,
+  product_id INT NOT NULL REFERENCES catalog_products(id) ON DELETE CASCADE,
+  media_type TEXT NOT NULL DEFAULT 'IMAGE' CHECK (media_type IN ('IMAGE','VIDEO')),
+  uri        TEXT NOT NULL,
+  label      TEXT,
+  sort_order INT NOT NULL DEFAULT 0
+);
+
+CREATE INDEX ix_product_media_product ON product_media(product_id, sort_order);
+
+
+-- Specs with grouping (Top highlights / Product details / etc.)
+CREATE TABLE product_specs (
+  id         SERIAL PRIMARY KEY,
+  product_id INT NOT NULL REFERENCES catalog_products(id) ON DELETE CASCADE,
+  spec_group TEXT NOT NULL DEFAULT 'General',
+  spec_key   TEXT NOT NULL,
+  spec_value TEXT NOT NULL,
+  sort_order INT NOT NULL DEFAULT 0
+);
+
+CREATE INDEX ix_product_specs_product ON product_specs(product_id, spec_group, sort_order);
+
+
+-- Tags (for browse + similar + explore)
+CREATE TABLE product_tags (
+  product_id INT NOT NULL REFERENCES catalog_products(id) ON DELETE CASCADE,
+  tag        TEXT NOT NULL,
+  PRIMARY KEY(product_id, tag)
+);
+
+CREATE INDEX ix_product_tags_tag ON product_tags(tag);
+
+
+-- =========================================================
+-- 6) STORE OFFERS: store sells a SKU (price/mrp/stock/promise)
+-- =========================================================
+DROP TABLE IF EXISTS store_offers CASCADE;
+
+CREATE TABLE store_offers (
+  id           SERIAL PRIMARY KEY,
+
+  store_id     INT NOT NULL REFERENCES provider_stores(id) ON DELETE CASCADE,
+  sku_id       INT NOT NULL REFERENCES catalog_skus(id) ON DELETE CASCADE,
+
+  is_active    BOOLEAN NOT NULL DEFAULT TRUE,
+
+  currency     TEXT NOT NULL DEFAULT 'INR',
+  price        NUMERIC(12,2) NOT NULL DEFAULT 0,
+  mrp          NUMERIC(12,2),
+  discount_pct INT CHECK (discount_pct BETWEEN 0 AND 95),
+
+  stock_qty     INT NOT NULL DEFAULT 0,
+  reorder_level INT NOT NULL DEFAULT 0,
+
+  -- fulfillment promise
+  shipping_fee NUMERIC(12,2),
+  eta_text     TEXT,
+  eta_days_min INT,
+  eta_days_max INT,
+  returnable   BOOLEAN,
+  warranty_months INT,
+
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  UNIQUE(store_id, sku_id)
+);
+
+CREATE INDEX ix_store_offers_store ON store_offers(store_id);
+CREATE INDEX ix_store_offers_sku ON store_offers(sku_id);
+CREATE INDEX ix_store_offers_active ON store_offers(is_active) WHERE is_active=TRUE;
+CREATE INDEX ix_store_offers_instock ON store_offers(store_id, stock_qty) WHERE stock_qty > 0;
+
+
+-- =========================================================
+-- 7) PROMOTIONS (Deals/Coupons/Bank/Bundles)
+-- =========================================================
+DROP TABLE IF EXISTS promotion_targets CASCADE;
+DROP TABLE IF EXISTS promotions CASCADE;
+
+CREATE TABLE promotions (
+  id SERIAL PRIMARY KEY,
+  title TEXT NOT NULL,
+  subtitle TEXT,
+
+  promo_type TEXT NOT NULL CHECK (promo_type IN ('DISCOUNT','COUPON','BANK','BUNDLE')),
+  discount_pct INT CHECK (discount_pct BETWEEN 0 AND 95),
+  discount_amount NUMERIC(12,2) CHECK (discount_amount >= 0),
+
+  min_qty INT NOT NULL DEFAULT 1 CHECK (min_qty >= 1),
+
+  valid_from TIMESTAMPTZ NOT NULL DEFAULT now(),
+  valid_to TIMESTAMPTZ,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE promotion_targets (
+  id SERIAL PRIMARY KEY,
+  promo_id INT NOT NULL REFERENCES promotions(id) ON DELETE CASCADE,
+  store_offer_id INT NOT NULL REFERENCES store_offers(id) ON DELETE CASCADE,
+  UNIQUE(promo_id, store_offer_id)
+);
+
+CREATE INDEX ix_promo_targets_offer ON promotion_targets(store_offer_id);
+
+
+-- =========================================================
+-- 8) CART + ORDERS + ORDER ITEMS (for bought-in-month + invoices)
+-- =========================================================
+DROP TABLE IF EXISTS order_items CASCADE;
+DROP TABLE IF EXISTS orders CASCADE;
+DROP TABLE IF EXISTS cart_items CASCADE;
+DROP TABLE IF EXISTS carts CASCADE;
+
+CREATE TABLE carts (
+  id SERIAL PRIMARY KEY,
+  parent_user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  address_id INT REFERENCES user_addresses(id) ON DELETE SET NULL,
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
   UNIQUE(parent_user_id)
 );
 
-CREATE TABLE IF NOT EXISTS cart_items (
-  id            SERIAL PRIMARY KEY,
-  cart_id       INTEGER NOT NULL REFERENCES carts(id) ON DELETE CASCADE,
-  catalog_item_id INTEGER NOT NULL REFERENCES store_items(id) ON DELETE RESTRICT,
-  qty           INTEGER NOT NULL DEFAULT 1 CHECK (qty > 0),
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE(cart_id, catalog_item_id)
+DROP TRIGGER IF EXISTS touch_carts ON carts;
+CREATE TRIGGER touch_carts
+BEFORE UPDATE ON carts
+FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
+
+CREATE TABLE cart_items (
+  id SERIAL PRIMARY KEY,
+  cart_id INT NOT NULL REFERENCES carts(id) ON DELETE CASCADE,
+  store_offer_id INT NOT NULL REFERENCES store_offers(id) ON DELETE RESTRICT,
+  qty INT NOT NULL CHECK (qty >= 1),
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  UNIQUE(cart_id, store_offer_id)
 );
 
-CREATE INDEX IF NOT EXISTS ix_cart_items_cart ON cart_items(cart_id);
-CREATE INDEX IF NOT EXISTS ix_cart_items_catalog_item ON cart_items(catalog_item_id);
+CREATE INDEX ix_cart_items_cart ON cart_items(cart_id);
+
+DROP TRIGGER IF EXISTS touch_cart_items ON cart_items;
+CREATE TRIGGER touch_cart_items
+BEFORE UPDATE ON cart_items
+FOR EACH ROW EXECUTE FUNCTION trg_touch_updated_at();
+
+
+CREATE TABLE orders (
+  id SERIAL PRIMARY KEY,
+
+  parent_user_id INT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  store_id INT NOT NULL REFERENCES provider_stores(id) ON DELETE RESTRICT,
+  address_id INT NOT NULL REFERENCES user_addresses(id) ON DELETE RESTRICT,
+
+  status TEXT NOT NULL CHECK (status IN ('CREATED','CONFIRMED','PACKED','DISPATCHED','DELIVERED','CANCELLED')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  currency TEXT NOT NULL DEFAULT 'INR',
+  items_total NUMERIC(12,2) NOT NULL DEFAULT 0,
+  discount_total NUMERIC(12,2) NOT NULL DEFAULT 0,
+  shipping_fee NUMERIC(12,2) NOT NULL DEFAULT 0,
+  tax_total NUMERIC(12,2) NOT NULL DEFAULT 0,
+  grand_total NUMERIC(12,2) NOT NULL DEFAULT 0,
+
+  invoice_no TEXT,
+  invoice_created_at TIMESTAMPTZ
+);
+
+CREATE INDEX ix_orders_parent_created ON orders(parent_user_id, created_at DESC);
+CREATE INDEX ix_orders_store_created ON orders(store_id, created_at DESC);
+
+CREATE TABLE order_items (
+  id SERIAL PRIMARY KEY,
+  order_id INT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+
+  store_offer_id INT NOT NULL REFERENCES store_offers(id) ON DELETE RESTRICT,
+  sku_id INT NOT NULL REFERENCES catalog_skus(id) ON DELETE RESTRICT,
+  product_id INT NOT NULL REFERENCES catalog_products(id) ON DELETE RESTRICT,
+
+  title_snapshot TEXT NOT NULL,
+  variant_snapshot TEXT,
+
+  qty INT NOT NULL CHECK (qty >= 1),
+
+  unit_price NUMERIC(12,2) NOT NULL,
+  mrp NUMERIC(12,2),
+  discount_amt NUMERIC(12,2) NOT NULL DEFAULT 0,
+
+  gst_pct NUMERIC(5,2) NOT NULL DEFAULT 0,
+  gst_amt NUMERIC(12,2) NOT NULL DEFAULT 0,
+
+  line_total NUMERIC(12,2) NOT NULL DEFAULT 0
+);
+
+CREATE INDEX ix_order_items_order ON order_items(order_id);
+CREATE INDEX ix_order_items_product ON order_items(product_id);
+
+
+-- =========================================================
+-- 9) PRODUCT REVIEWS + MEDIA + HELPFUL VOTES
+-- =========================================================
+DROP TABLE IF EXISTS review_votes CASCADE;
+DROP TABLE IF EXISTS review_media CASCADE;
+DROP TABLE IF EXISTS item_reviews CASCADE;
+
+CREATE TABLE item_reviews (
+  id SERIAL PRIMARY KEY,
+  product_id INT NOT NULL REFERENCES catalog_products(id) ON DELETE CASCADE,
+  sku_id INT REFERENCES catalog_skus(id) ON DELETE SET NULL,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+
+  rating INT NOT NULL CHECK (rating BETWEEN 1 AND 5),
+  title TEXT,
+  body TEXT NOT NULL,
+
+  is_verified_purchase BOOLEAN NOT NULL DEFAULT FALSE,
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(product_id, user_id)
+);
+
+CREATE INDEX ix_reviews_product_time ON item_reviews(product_id, created_at DESC);
+
+CREATE TABLE review_media (
+  id SERIAL PRIMARY KEY,
+  review_id INT NOT NULL REFERENCES item_reviews(id) ON DELETE CASCADE,
+  media_type TEXT NOT NULL DEFAULT 'IMAGE' CHECK (media_type IN ('IMAGE','VIDEO')),
+  uri TEXT NOT NULL,
+  sort_order INT NOT NULL DEFAULT 0
+);
+
+CREATE INDEX ix_review_media_review ON review_media(review_id, sort_order);
+
+-- helpful votes: 1 row per user per review
+CREATE TABLE review_votes (
+  id SERIAL PRIMARY KEY,
+  review_id INT NOT NULL REFERENCES item_reviews(id) ON DELETE CASCADE,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  is_helpful BOOLEAN NOT NULL, -- true=helpful, false=not helpful
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(review_id, user_id)
+);
+
+CREATE INDEX ix_review_votes_review ON review_votes(review_id);
+
+
+-- =========================================================
+-- 10) STORE REVIEWS (separate from product reviews)
+-- =========================================================
+DROP TABLE IF EXISTS store_review_votes CASCADE;
+DROP TABLE IF EXISTS store_reviews CASCADE;
+
+CREATE TABLE store_reviews (
+  id SERIAL PRIMARY KEY,
+  store_id INT NOT NULL REFERENCES provider_stores(id) ON DELETE CASCADE,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+
+  rating INT NOT NULL CHECK (rating BETWEEN 1 AND 5),
+  title TEXT,
+  body TEXT,
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(store_id, user_id)
+);
+
+CREATE INDEX ix_store_reviews_store_time ON store_reviews(store_id, created_at DESC);
+
+CREATE TABLE store_review_votes (
+  id SERIAL PRIMARY KEY,
+  review_id INT NOT NULL REFERENCES store_reviews(id) ON DELETE CASCADE,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  is_helpful BOOLEAN NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(review_id, user_id)
+);
+
+
+-- =========================================================
+-- 11) Q/A
+-- =========================================================
+DROP TABLE IF EXISTS item_answers CASCADE;
+DROP TABLE IF EXISTS item_questions CASCADE;
+
+CREATE TABLE item_questions (
+  id SERIAL PRIMARY KEY,
+  product_id INT NOT NULL REFERENCES catalog_products(id) ON DELETE CASCADE,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  question TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE item_answers (
+  id SERIAL PRIMARY KEY,
+  question_id INT NOT NULL REFERENCES item_questions(id) ON DELETE CASCADE,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  answer TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX ix_questions_product_time ON item_questions(product_id, created_at DESC);
+
+
+-- =========================================================
+-- 12) WISHLIST (product-level)
+-- =========================================================
+DROP TABLE IF EXISTS wishlist_items CASCADE;
+DROP TABLE IF EXISTS wishlists CASCADE;
+
+CREATE TABLE wishlists (
+  id SERIAL PRIMARY KEY,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(user_id)
+);
+
+CREATE TABLE wishlist_items (
+  id SERIAL PRIMARY KEY,
+  wishlist_id INT NOT NULL REFERENCES wishlists(id) ON DELETE CASCADE,
+  product_id INT NOT NULL REFERENCES catalog_products(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(wishlist_id, product_id)
+);
+
+CREATE INDEX ix_wishlist_items_wishlist ON wishlist_items(wishlist_id);
+
+
+-- =========================================================
+-- 13) RECOMMENDATIONS: curated + signals
+-- =========================================================
+DROP TABLE IF EXISTS user_item_events CASCADE;
+DROP TABLE IF EXISTS item_relations CASCADE;
+
+-- curated relations between products
+CREATE TABLE item_relations (
+  id SERIAL PRIMARY KEY,
+  product_id INT NOT NULL REFERENCES catalog_products(id) ON DELETE CASCADE,
+  related_product_id INT NOT NULL REFERENCES catalog_products(id) ON DELETE CASCADE,
+
+  relation_type TEXT NOT NULL CHECK (relation_type IN ('SIMILAR','ALSO_LIKE','FBT')),
+  weight INT NOT NULL DEFAULT 100,
+
+  UNIQUE(product_id, related_product_id, relation_type)
+);
+
+CREATE INDEX ix_item_relations_product_type ON item_relations(product_id, relation_type, weight DESC);
+
+-- behavioral events for ML later + quick analytics now
+CREATE TABLE user_item_events (
+  id SERIAL PRIMARY KEY,
+  user_id INT REFERENCES users(id) ON DELETE SET NULL,
+  product_id INT NOT NULL REFERENCES catalog_products(id) ON DELETE CASCADE,
+  event_type TEXT NOT NULL CHECK (event_type IN ('VIEW','ADD_TO_CART','WISHLIST','PURCHASE')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  meta JSONB NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX ix_events_product_time ON user_item_events(product_id, created_at DESC);
+CREATE INDEX ix_events_user_time ON user_item_events(user_id, created_at DESC);

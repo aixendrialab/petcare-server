@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from typing import Optional, Literal, List
+from typing import Optional, Literal, Any, List
+
 from app.routers.security import current_user_id
 from app.core.db import get_conn
 
 router = APIRouter()
-
 ProviderRole = Literal["vendor","pharmacist","nutritionist","hostel"]
 
 async def _my_store_id(user_id: int, role: str) -> int:
@@ -16,244 +16,226 @@ async def _my_store_id(user_id: int, role: str) -> int:
             raise HTTPException(400, f"No store profile for role={role}. Complete onboarding first.")
         return int(row[0])
 
-CatalogKind = Literal["PRODUCT", "SERVICE"]  # or whatever your UI enum is
-CatalogCategory = Literal["FOOD","ACCESSORY","MEDICINE","SERVICE"]
-
-class CatalogUpsertIn(BaseModel):
-    id: Optional[int] = None
-
-    # UI field names
-    provider_id: Optional[int] = None
-    kind: Optional[CatalogKind] = None
-
-    name: str
-    description: Optional[str] = None
-    category: CatalogCategory
-
-    price: float = 0
-    active: bool = True
-
-    rx_required: bool = False
-    image_uri: Optional[str] = None
-
-    # If you want to keep DB fields but accept UI names too:
-    # (Not required, but handy)
-    currency: str = "INR"
-    brand: Optional[str] = None
-
-    class Config:
-        populate_by_name = True
-        extra = "ignore"   # ignore any future UI fields
+# --------------------------
+# Provider catalog = offers list
+# --------------------------
 
 @router.get("/store/items")
 async def list_my_items(role: ProviderRole = Query(...), user_id: int = Depends(current_user_id)):
     store_id = await _my_store_id(user_id, role)
+
     async with get_conn() as conn, conn.cursor() as cur:
         await cur.execute(
-            """SELECT id,
-                      store_id as provider_id,
-                      'PRODUCT' as kind,
-                      category,
-                      title as name,
-                      description,
-                      price,
-                      is_active as active,
-                      prescription_required as rx_required,
-                      image_uri
-               FROM store_items
-               WHERE store_id=%s
-               ORDER BY id DESC""",
+            """
+            SELECT
+              so.id AS offer_id,
+              so.store_id,
+              p.id AS product_id,
+              sku.id AS sku_id,
+              p.category,
+              p.title,
+              COALESCE(b.name, p.brand_text) AS brand,
+              so.price, so.mrp, so.currency, so.discount_pct,
+              so.stock_qty, so.reorder_level,
+              so.is_active,
+              so.shipping_fee, so.eta_text, so.eta_days_min, so.eta_days_max, so.returnable, so.warranty_months
+            FROM store_offers so
+            JOIN catalog_skus sku ON sku.id = so.sku_id
+            JOIN catalog_products p ON p.id = sku.product_id
+            LEFT JOIN brands b ON b.id = p.brand_id
+            WHERE so.store_id=%s
+            ORDER BY p.title, sku.sort_order, so.id DESC
+            """,
             (store_id,),
         )
         rows = await cur.fetchall()
 
-    keys = ["id","provider_id","kind","category","name","description","price","active","rx_required","image_uri"]
+    keys = [
+        "offer_id","store_id","product_id","sku_id","category","title","brand",
+        "price","mrp","currency","discount_pct",
+        "stock_qty","reorder_level",
+        "is_active",
+        "shipping_fee","eta_text","eta_days_min","eta_days_max","returnable","warranty_months"
+    ]
     return {"items": [dict(zip(keys, r)) for r in rows]}
 
+class OfferUpsertIn(BaseModel):
+    offer_id: Optional[int] = None  # update by offer_id
+    sku_id: Optional[int] = None    # create/update by sku_id (must already exist)
+
+    price: Optional[float] = None
+    mrp: Optional[float] = None
+    discount_pct: Optional[int] = None
+    stock_qty: Optional[int] = None
+    reorder_level: Optional[int] = None
+    is_active: Optional[bool] = None
+
+    shipping_fee: Optional[float] = None
+    eta_text: Optional[str] = None
+    eta_days_min: Optional[int] = None
+    eta_days_max: Optional[int] = None
+    returnable: Optional[bool] = None
+    warranty_months: Optional[int] = None
+
 @router.post("/store/items")
-async def upsert_item(role: ProviderRole = Query(...), body: CatalogUpsertIn = None, user_id: int = Depends(current_user_id)):
+async def upsert_offer(role: ProviderRole = Query(...), body: OfferUpsertIn = None, user_id: int = Depends(current_user_id)):
     store_id = await _my_store_id(user_id, role)
 
+    if not body:
+        raise HTTPException(400, "Body required")
+
     async with get_conn() as conn, conn.cursor() as cur:
-        if body.id:
+        if body.offer_id:
+            # update existing offer
             await cur.execute(
-                """UPDATE store_items SET
-                      title=%s,
-                      description=%s,
-                      category=%s,
-                      image_uri=%s,
-                      price=%s,
-                      currency=%s,
-                      is_active=%s,
-                      prescription_required=%s,
-                      updated_at=now()
-                   WHERE id=%s AND store_id=%s
-                   RETURNING id""",
+                """
+                UPDATE store_offers SET
+                  price=COALESCE(%s, price),
+                  mrp=COALESCE(%s, mrp),
+                  discount_pct=COALESCE(%s, discount_pct),
+                  stock_qty=COALESCE(%s, stock_qty),
+                  reorder_level=COALESCE(%s, reorder_level),
+                  is_active=COALESCE(%s, is_active),
+                  shipping_fee=COALESCE(%s, shipping_fee),
+                  eta_text=COALESCE(%s, eta_text),
+                  eta_days_min=COALESCE(%s, eta_days_min),
+                  eta_days_max=COALESCE(%s, eta_days_max),
+                  returnable=COALESCE(%s, returnable),
+                  warranty_months=COALESCE(%s, warranty_months),
+                  updated_at=now()
+                WHERE id=%s AND store_id=%s
+                RETURNING id
+                """,
                 (
-                    body.name,
-                    body.description,
-                    body.category,
-                    body.image_uri,
-                    body.price,
-                    body.currency,
-                    body.active,
-                    body.rx_required,
-                    body.id,
-                    store_id,
+                    body.price, body.mrp, body.discount_pct,
+                    body.stock_qty, body.reorder_level, body.is_active,
+                    body.shipping_fee, body.eta_text, body.eta_days_min, body.eta_days_max,
+                    body.returnable, body.warranty_months,
+                    body.offer_id, store_id,
                 ),
             )
             row = await cur.fetchone()
             if not row:
-                raise HTTPException(404, "Item not found")
-            item_id = row[0]
-        else:
-            await cur.execute(
-                """INSERT INTO store_items
-                   (store_id, title, description, category, image_uri, price, currency, is_active, prescription_required)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                   RETURNING id""",
-                (
-                    store_id,
-                    body.name,
-                    body.description,
-                    body.category,
-                    body.image_uri,
-                    body.price,
-                    body.currency,
-                    body.active,
-                    body.rx_required,
-                ),
-            )
-            item_id = (await cur.fetchone())[0]
+                raise HTTPException(404, "Offer not found")
+            return {"ok": True, "offer_id": int(row[0])}
 
-    return {"ok": True, "id": item_id}
+        # create offer requires sku_id
+        if not body.sku_id:
+            raise HTTPException(400, "sku_id is required to create an offer")
 
-@router.get("/shop/items/{item_id}")
-async def get_shop_item(
-    item_id: int,
-    user_id: int = Depends(current_user_id),
-):
-    sql = """
-      SELECT
-        it.id,
-        it.store_id as provider_id,
-        'PRODUCT' as kind,
-        it.category,
-        it.title as name,
-        it.description,
-        it.brand,
-        it.image_uri,
-        it.price,
-        it.currency,
-        it.is_active as active,
-        it.prescription_required as rx_required,
-        s.display_name as store_name,
-        COALESCE(inv.stock_qty, 0) as stock_qty
-      FROM store_items it
-      JOIN provider_stores s ON s.id = it.store_id
-      LEFT JOIN store_inventory inv
-        ON inv.catalog_item_id = it.id AND inv.store_id = it.store_id
-      WHERE it.id = %s
-        AND it.is_active = TRUE
-    """
+        await cur.execute("SELECT id FROM catalog_skus WHERE id=%s", (body.sku_id,))
+        if not await cur.fetchone():
+            raise HTTPException(400, "Invalid sku_id")
 
-    async with get_conn() as conn, conn.cursor() as cur:
-        await cur.execute(sql, (item_id,))
-        row = await cur.fetchone()
+        await cur.execute(
+            """
+            INSERT INTO store_offers
+              (store_id, sku_id, is_active, price, mrp, discount_pct, stock_qty, reorder_level,
+               shipping_fee, eta_text, eta_days_min, eta_days_max, returnable, warranty_months)
+            VALUES
+              (%s,%s,COALESCE(%s,TRUE),COALESCE(%s,0),%s,%s,COALESCE(%s,0),COALESCE(%s,0),
+               %s,%s,%s,%s,%s,%s)
+            ON CONFLICT (store_id, sku_id) DO UPDATE SET
+              is_active=COALESCE(EXCLUDED.is_active, store_offers.is_active),
+              price=COALESCE(EXCLUDED.price, store_offers.price),
+              mrp=COALESCE(EXCLUDED.mrp, store_offers.mrp),
+              discount_pct=COALESCE(EXCLUDED.discount_pct, store_offers.discount_pct),
+              stock_qty=COALESCE(EXCLUDED.stock_qty, store_offers.stock_qty),
+              reorder_level=COALESCE(EXCLUDED.reorder_level, store_offers.reorder_level),
+              shipping_fee=COALESCE(EXCLUDED.shipping_fee, store_offers.shipping_fee),
+              eta_text=COALESCE(EXCLUDED.eta_text, store_offers.eta_text),
+              eta_days_min=COALESCE(EXCLUDED.eta_days_min, store_offers.eta_days_min),
+              eta_days_max=COALESCE(EXCLUDED.eta_days_max, store_offers.eta_days_max),
+              returnable=COALESCE(EXCLUDED.returnable, store_offers.returnable),
+              warranty_months=COALESCE(EXCLUDED.warranty_months, store_offers.warranty_months),
+              updated_at=now()
+            RETURNING id
+            """,
+            (
+                store_id, body.sku_id,
+                body.is_active, body.price, body.mrp, body.discount_pct,
+                body.stock_qty, body.reorder_level,
+                body.shipping_fee, body.eta_text, body.eta_days_min, body.eta_days_max,
+                body.returnable, body.warranty_months,
+            ),
+        )
+        oid = int((await cur.fetchone())[0])
+        return {"ok": True, "offer_id": oid}
 
-    if not row:
-        raise HTTPException(404, "Item not found")
-
-    keys = [
-        "id",
-        "provider_id",
-        "kind",
-        "category",
-        "name",
-        "description",
-        "brand",
-        "image_uri",
-        "price",
-        "currency",
-        "active",
-        "rx_required",
-        "store_name",
-        "stock_qty",
-    ]
-    return {"item": dict(zip(keys, row))}
+# --------------------------
+# Provider inventory (v2)
+# --------------------------
 
 @router.get("/store/inventory")
 async def list_inventory(role: ProviderRole = Query(...), user_id: int = Depends(current_user_id)):
     store_id = await _my_store_id(user_id, role)
+
     async with get_conn() as conn, conn.cursor() as cur:
         await cur.execute(
-            """SELECT i.id, i.store_id, i.catalog_item_id, i.stock_qty, i.reorder_level, i.batch_no, i.expiry_date,
-                      it.title, it.category
-               FROM store_inventory i
-               JOIN store_items it ON it.id=i.catalog_item_id
-               WHERE i.store_id=%s
-               ORDER BY it.title""",
+            """
+            SELECT
+              so.id          AS offer_id,
+              so.store_id,
+              p.id           AS product_id,
+              sku.id         AS sku_id,
+              p.title,
+              CASE
+                WHEN sku.variant_key IS NOT NULL AND sku.variant_value IS NOT NULL
+                  THEN (sku.variant_key || ': ' || sku.variant_value)
+                ELSE NULL
+              END AS variant,
+              so.stock_qty,
+              so.reorder_level,
+              so.price,
+              so.mrp,
+              so.currency,
+              so.is_active
+            FROM store_offers so
+            JOIN catalog_skus sku ON sku.id = so.sku_id
+            JOIN catalog_products p ON p.id = sku.product_id
+            WHERE so.store_id=%s
+            ORDER BY p.title, sku.sort_order, so.id
+            """,
             (store_id,),
         )
         rows = await cur.fetchall()
-    keys = ["id","store_id","catalog_item_id","stock_qty","reorder_level","batch_no","expiry_date","title","category"]
+
+    keys = [
+        "offer_id","store_id","product_id","sku_id","title","variant",
+        "stock_qty","reorder_level","price","mrp","currency","is_active"
+    ]
     return {"items": [dict(zip(keys, r)) for r in rows]}
 
 class AdjustStockIn(BaseModel):
-    catalog_item_id: int
+    sku_id: int
     delta: int
     reorder_level: Optional[int] = None
-    batch_no: Optional[str] = None
-    expiry_date: Optional[str] = None  # YYYY-MM-DD
 
 @router.post("/store/inventory/adjust")
 async def adjust_stock(role: ProviderRole = Query(...), body: AdjustStockIn = None, user_id: int = Depends(current_user_id)):
     store_id = await _my_store_id(user_id, role)
+
     async with get_conn() as conn, conn.cursor() as cur:
         await cur.execute(
-            """INSERT INTO store_inventory (store_id, catalog_item_id, stock_qty, reorder_level, batch_no, expiry_date)
-               VALUES (%s,%s,%s,COALESCE(%s,0),%s,%s::date)
-               ON CONFLICT (store_id, catalog_item_id) DO UPDATE SET
-                 stock_qty = store_inventory.stock_qty + EXCLUDED.stock_qty,
-                 reorder_level = COALESCE(EXCLUDED.reorder_level, store_inventory.reorder_level),
-                 batch_no = COALESCE(EXCLUDED.batch_no, store_inventory.batch_no),
-                 expiry_date = COALESCE(EXCLUDED.expiry_date, store_inventory.expiry_date),
-                 updated_at=now()
-               RETURNING id, stock_qty""",
-            (store_id, body.catalog_item_id, body.delta, body.reorder_level, body.batch_no, body.expiry_date),
-        )
-        inv_id, qty = await cur.fetchone()
-    return {"ok": True, "inventory_id": inv_id, "stock_qty": qty}
-
-# Provider order ops
-@router.get("/provider/orders")
-async def list_provider_orders(role: ProviderRole = Query(...), user_id: int = Depends(current_user_id)):
-    store_id = await _my_store_id(user_id, role)
-    async with get_conn() as conn, conn.cursor() as cur:
-        await cur.execute(
-            """SELECT id, buyer_user_id, store_id, status, total_amount, currency, created_at,
-                      prescription_required, prescription_attached
-               FROM orders WHERE store_id=%s ORDER BY id DESC""",
-            (store_id,),
-        )
-        rows = await cur.fetchall()
-    keys = ["id","buyer_user_id","store_id","status","total_amount","currency","created_at","prescription_required","prescription_attached"]
-    return {"items": [dict(zip(keys, r)) for r in rows]}
-
-class StatusIn(BaseModel):
-    status: str
-
-@router.patch("/provider/orders/{order_id}/status")
-async def set_order_status(order_id: int, role: ProviderRole = Query(...), body: StatusIn = None, user_id: int = Depends(current_user_id)):
-    store_id = await _my_store_id(user_id, role)
-    async with get_conn() as conn, conn.cursor() as cur:
-        await cur.execute(
-            """UPDATE orders SET status=%s, updated_at=now()
-               WHERE id=%s AND store_id=%s
-               RETURNING id""",
-            (body.status, order_id, store_id),
+            "SELECT id FROM store_offers WHERE store_id=%s AND sku_id=%s",
+            (store_id, body.sku_id),
         )
         row = await cur.fetchone()
         if not row:
-            raise HTTPException(404, "Order not found")
-    return {"ok": True}
+            raise HTTPException(404, "Offer not found for this SKU in your store")
+        offer_id = int(row[0])
+
+        await cur.execute(
+            """
+            UPDATE store_offers SET
+              stock_qty = GREATEST(stock_qty + %s, 0),
+              reorder_level = COALESCE(%s, reorder_level),
+              updated_at=now()
+            WHERE id=%s AND store_id=%s
+            RETURNING id, stock_qty
+            """,
+            (body.delta, body.reorder_level, offer_id, store_id),
+        )
+        oid, qty = await cur.fetchone()
+
+    return {"ok": True, "offer_id": oid, "stock_qty": qty}
