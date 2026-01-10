@@ -63,59 +63,63 @@ def ensure_special_users(conn) -> dict:
 
 def seed_users(conn, cfg) -> List[int]:
     """
-    Creates cfg.num_users users.
-    Always inserts SPECIAL_USERS first (id stable? not required).
-    Returns list of user ids.
+    Ensure we have *at least* cfg.num_users users in the DB (including SPECIAL_USERS).
+    Returns ALL user ids (sorted).
     """
     rng = random.Random(cfg.rng_seed + 10)
 
     # 1) Insert special users (idempotent)
     ensure_special_users(conn)
 
-    # 2) Count how many users exist after specials
+    # 2) Load existing users
     with conn.cursor() as cur:
         cur.execute("SELECT id FROM users ORDER BY id")
         existing_ids = [int(r[0]) for r in cur.fetchall()]
 
-    need = max(0, int(cfg.num_users) - len(existing_ids))
-    if need <= 0:
-        return existing_ids[: int(cfg.num_users)]
+    target = int(getattr(cfg, "num_users", 0) or 0)
+    if target <= 0:
+        return existing_ids
 
-    # 3) Insert generated users
-    # Keep phone unique and human-ish names
-    first_names = ["User", "Arjun", "Neha", "Rahul", "Priya", "Kiran", "Aditi", "Rohan", "Meera", "Vikram"]
-    last_names = ["Singh", "Rao", "Shah", "Patel", "Nair", "Iyer", "Khan", "Das", "Gupta", "Reddy"]
+    needed = max(0, target - len(existing_ids))
+    if needed:
+        seed_more_users(conn, cfg, needed, rng=rng)
 
-    rows: List[Tuple[str, str, str, str]] = []
-    # phone range for generated: +9191xxxxxxxxxx
-    base = 910000000000
-    used_phones = set(u[0] for u in SPECIAL_USERS)
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM users ORDER BY id")
+        return [int(r[0]) for r in cur.fetchall()]
 
-    i = 0
-    while len(rows) < need:
-        phone = f"+91{base + i}"
-        i += 1
-        if phone in used_phones:
-            continue
-        used_phones.add(phone)
-        name = f"{rng.choice(first_names)} {rng.choice(last_names)}"
-        email = f"user{phone[-7:]}@example.com"
-        # active_role can be NULL; but for your app flows parent helps
+
+def seed_more_users(conn, cfg, count: int, rng: random.Random | None = None) -> List[int]:
+    """
+    Inserts `count` additional generic users (active_role='parent' by default).
+    Returns their ids.
+    """
+    rng = rng or random.Random(cfg.rng_seed + 11)
+    rows = []
+    # Generate deterministic-ish phone ranges to avoid collisions
+    base = int(getattr(cfg, "random_phone_base", 910000000000))
+    # Offset by current max id to keep uniqueness stable
+    with conn.cursor() as cur:
+        cur.execute("SELECT COALESCE(MAX(id),0) FROM users")
+        max_id = int(cur.fetchone()[0] or 0)
+
+    for i in range(count):
+        n = max_id + i + 1
+        phone = f"+91{(base + n) % 10000000000:010d}"
+        email = f"user{n}@example.com"
+        name = f"User {n}"
         rows.append((phone, email, name, "parent"))
 
     with conn.cursor() as cur:
         cur.executemany(
-            """
-            INSERT INTO users (phone, email, name, active_role)
-            VALUES (%s,%s,%s,%s)
-            """,
+            "INSERT INTO users (phone, email, name, active_role) VALUES (%s,%s,%s,%s)",
             rows,
         )
 
     with conn.cursor() as cur:
-        cur.execute("SELECT id FROM users ORDER BY id")
-        return [int(r[0]) for r in cur.fetchall()][: int(cfg.num_users)]
-
+        cur.execute("SELECT id FROM users ORDER BY id DESC LIMIT %s", (count,))
+        ids = [int(r[0]) for r in cur.fetchall()]
+    return list(reversed(ids))
 
 def ensure_roles(conn, user_ids: List[int], role: str, pct: float, seed: int) -> List[int]:
     rng = random.Random(seed)

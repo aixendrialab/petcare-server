@@ -255,7 +255,8 @@ def _parse_args() -> argparse.Namespace:
 
     p.add_argument("--products", type=int, default=50_000)
     p.add_argument("--stores", type=int, default=100)
-    p.add_argument("--num-users", type=int, default=300)
+    p.add_argument("--num-users", type=int, default=300)  # legacy (will be treated as extra if > sum roles)
+    p.add_argument("--num-extra-users", type=int, default=0)
     p.add_argument("--num-store-owners", type=int, default=120)
 
     p.add_argument("--avg-skus-per-product", type=float, default=1.4)

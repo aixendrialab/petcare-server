@@ -27,7 +27,11 @@ class SeedConfig:
     # reviews/events
     num_reviews: int = 1_000
     reviews_mode: str = "sparse"          # sparse | dense
-    reviews_per_product: int = 50         # used if dense
+    reviews_per_product: int = 50
+    # sparse reviews tuning
+    reviews_coverage_pct: float = 0.60
+    reviews_popular_pct: float = 0.15
+    reviews_popular_weight: float = 0.80         # used if dense
     min_reviews_per_product_for_dense: int = 10  # dense mode lower bound
 
     events_per_user: int = 30
@@ -81,7 +85,10 @@ class SeedConfig:
     locations_per_vet: int = 1
     slot_minutes: int = 2                # ✅ user asked smaller slots
     appointment_span_days: int = 30      # range to schedule into future/past
-    appointments_per_parent: int = 6     # 2 upcoming + 2 completed + rest mixed
+    appointments_per_parent: int = 6     # 2 upcoming + 2 complete
+
+    # vaccines home visibility
+    vaccine_home_window_days: int = 30 #d + rest mixed
 
     # appointment state mix
     pct_booked: float = 0.55

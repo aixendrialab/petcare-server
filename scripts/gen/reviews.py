@@ -43,20 +43,57 @@ def seed_reviews(conn, product_ids: List[int], user_ids: List[int], cfg) -> None
 
 
 def _seed_sparse(conn, product_ids: Sequence[int], user_ids: Sequence[int], cfg, rng: random.Random, total: int) -> None:
+    """
+    Sparse-but-realistic:
+      - ensure baseline coverage for a % of products (so shop home isn't all zeros)
+      - distribute remaining reviews with a popularity skew (few products get lots)
+    """
     rows: List[Tuple] = []
     verified_rate = float(getattr(cfg, "reviews_verified_rate", 0.4))
+    coverage_pct = float(getattr(cfg, "reviews_coverage_pct", 0.60))  # 60% products get >=1 review
+    pop_pct = float(getattr(cfg, "reviews_popular_pct", 0.15))        # 15% products are "popular"
+    pop_weight = float(getattr(cfg, "reviews_popular_weight", 0.80))  # 80% of reviews go to popular set
 
-    for _ in range(total):
-        pid = rng.choice(product_ids)
+    pids = list(product_ids)
+    if not pids or not user_ids or total <= 0:
+        return
+
+    # 1) baseline coverage: 1 review for many products
+    coverage_n = int(min(len(pids), max(0, round(len(pids) * coverage_pct))))
+    coverage_n = min(coverage_n, total)
+    covered = rng.sample(pids, coverage_n) if coverage_n > 0 else []
+
+    for pid in covered:
         uid = rng.choice(user_ids)
-        rating = rng.randint(3, 5) if rng.random() < 0.85 else rng.randint(1, 3)
-        title = rng.choice(TITLES)
+        rating = rng.randint(3, 5) if rng.random() < 0.85 else rng.randint(1, 5)
+        title = None if rng.random() < 0.35 else rng.choice(TITLES)
         body = rng.choice(BODIES)
-        verified = (rng.random() < verified_rate)
+        verified = rng.random() < verified_rate
+        rows.append((pid, None, uid, rating, title, body, verified))
+
+    remaining = total - len(rows)
+    if remaining <= 0:
+        _insert_reviews(conn, rows, cfg)
+        return
+
+    # 2) popularity skew for remaining reviews
+    pop_n = int(max(1, round(len(pids) * pop_pct)))
+    popular = set(rng.sample(pids, min(pop_n, len(pids))))
+
+    for _ in range(remaining):
+        if rng.random() < pop_weight:
+            pid = rng.choice(tuple(popular))
+        else:
+            pid = rng.choice(pids)
+
+        uid = rng.choice(user_ids)
+        rating = rng.randint(3, 5) if rng.random() < 0.85 else rng.randint(1, 5)
+        title = None if rng.random() < 0.35 else rng.choice(TITLES)
+        body = rng.choice(BODIES)
+        verified = rng.random() < verified_rate
         rows.append((pid, None, uid, rating, title, body, verified))
 
     _insert_reviews(conn, rows, cfg)
-
 
 def _seed_dense(conn, product_ids: Sequence[int], user_ids: Sequence[int], cfg, rng: random.Random, per_prod: int) -> None:
     # Need at least per_prod distinct users to avoid conflict storms

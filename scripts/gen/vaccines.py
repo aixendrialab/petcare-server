@@ -64,8 +64,13 @@ def seed_pet_vaccines(conn, pet_ids: List[int], vet_user_ids: List[int], cfg) ->
                     vid = vmap.get((code, species))
                     if not vid:
                         continue
-                    due = base + timedelta(days=rng.randint(1, 90))
-                    status = rng.choice(["UPCOMING","DUE"])
+                    home_window = int(getattr(cfg, 'vaccine_home_window_days', 30))
+                    # Guarantee first item visible on parent home ([-7 .. +home_window])
+                    if dose_no == 1:
+                        due = base + timedelta(days=rng.randint(-7, home_window))
+                    else:
+                        due = base + timedelta(days=rng.randint(-30, 180))
+                    status = "DUE" if due <= date.today() else "UPCOMING"
                     cur.execute(
                         """
                         INSERT INTO pet_vaccine_plan_item (plan_id, vaccine_id, dose_no, due_on, status)
