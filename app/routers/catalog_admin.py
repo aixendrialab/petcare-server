@@ -34,17 +34,9 @@ async def _ensure_vendor_context(user_id: int, role: str) -> None:
 
 async def _assert_owns_product(*, product_id: int, user_id: int) -> None:
     async with get_conn() as conn, conn.cursor() as cur:
-        await cur.execute("SELECT user_id FROM catalog_products WHERE id=%s", (product_id,))
-        row = await cur.fetchone()
-        if not row:
+        await cur.execute("SELECT 1 FROM catalog_products WHERE id=%s", (product_id,))
+        if not await cur.fetchone():
             raise HTTPException(404, "Product not found")
-        owner = row[0]
-        if owner is None:
-            # global/admin product
-            raise HTTPException(403, "Cannot edit global product")
-        if int(owner) != int(user_id):
-            raise HTTPException(403, "Not allowed to edit this product")
-
 
 # ------------------------
 # Brands (optional)
@@ -174,22 +166,115 @@ async def list_products(
 
 
 @router.get("/catalog/products/{product_id}")
-async def get_product(product_id: int, user_id: int = Depends(current_user_id)):
+async def get_product(product_id: int, role: str = Query(...)):
     async with get_conn() as conn, conn.cursor() as cur:
+        # 1) core
         await cur.execute(
             """
             SELECT id, category, brand_id, brand_text, title, short_desc, description,
                    prescription_required, hsn_code, tax_class, variant_theme, is_active
             FROM catalog_products
-            WHERE id=%s AND user_id=%s
+            WHERE id=%s
             """,
-            (product_id, user_id),
+            (product_id,),
         )
         p = await cur.fetchone()
         if not p:
             raise HTTPException(404, "Product not found")
-        ...
 
+        keys = [
+            "product_id",
+            "category",
+            "brand_id",
+            "brand_text",
+            "title",
+            "short_desc",
+            "description",
+            "prescription_required",
+            "hsn_code",
+            "tax_class",
+            "variant_theme",
+            "is_active",
+        ]
+        product = dict(zip(keys, p))
+
+        # 2) tags
+        await cur.execute(
+            "SELECT tag FROM product_tags WHERE product_id=%s ORDER BY tag ASC",
+            (product_id,),
+        )
+        product["tags"] = [r[0] for r in (await cur.fetchall())]
+
+        # 3) skus
+        await cur.execute(
+            """
+            SELECT id, variant_key, variant_value, pack_label, sku_code, barcode, sort_order, is_active
+            FROM catalog_skus
+            WHERE product_id=%s
+            ORDER BY sort_order ASC, id ASC
+            """,
+            (product_id,),
+        )
+        sku_rows = await cur.fetchall()
+        product["skus"] = [
+            {
+                "sku_id": r[0],
+                "variant_key": r[1],
+                "variant_value": r[2],
+                "pack_label": r[3],
+                "sku_code": r[4],
+                "barcode": r[5],
+                "sort_order": r[6],
+                "is_active": bool(r[7]),
+            }
+            for r in sku_rows
+        ]
+
+        # 4) media
+        await cur.execute(
+            """
+            SELECT id, media_type, uri, label, sort_order
+            FROM product_media
+            WHERE product_id=%s
+            ORDER BY sort_order ASC, id ASC
+            """,
+            (product_id,),
+        )
+        media_rows = await cur.fetchall()
+        product["media"] = [
+            {
+                "id": r[0],
+                "media_type": r[1],
+                "uri": r[2],
+                "label": r[3],
+                "sort_order": r[4],
+            }
+            for r in media_rows
+        ]
+
+        # 5) specs
+        await cur.execute(
+            """
+            SELECT id, spec_group, spec_key, spec_value, sort_order
+            FROM product_specs
+            WHERE product_id=%s
+            ORDER BY spec_group ASC, sort_order ASC, id ASC
+            """,
+            (product_id,),
+        )
+        spec_rows = await cur.fetchall()
+        product["specs"] = [
+            {
+                "id": r[0],
+                "spec_group": r[1],
+                "key": r[2],
+                "value": r[3],
+                "sort_order": r[4],
+            }
+            for r in spec_rows
+        ]
+
+        return {"product": product}
 
 @router.post("/catalog/products")
 async def create_product(
