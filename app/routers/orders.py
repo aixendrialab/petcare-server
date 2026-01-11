@@ -294,3 +294,80 @@ async def set_provider_order_status(order_id: int, role: ProviderRole = Query(..
         if not await cur.fetchone():
             raise HTTPException(404, "Order not found")
     return {"ok": True}
+
+@router.get("/provider/orders/{order_id}")
+async def provider_order_detail(
+    order_id: int,
+    role: ProviderRole = Query(...),
+    user_id: int = Depends(current_user_id),
+):
+    store_id = await _my_store_id(user_id, role)
+
+    async with get_conn() as conn, conn.cursor() as cur:
+        await cur.execute(
+            """
+            SELECT o.id, o.store_id, ps.display_name, o.status, o.created_at, o.currency,
+                   o.items_total, o.discount_total, o.shipping_fee, o.tax_total, o.grand_total,
+                   a.label, a.recipient, a.phone, a.line1, a.line2, a.landmark, a.city, a.state, a.pincode
+            FROM orders o
+            JOIN provider_stores ps ON ps.id=o.store_id
+            JOIN user_addresses a ON a.id=o.address_id
+            WHERE o.id=%s AND o.store_id=%s
+            """,
+            (order_id, store_id),
+        )
+        o = await cur.fetchone()
+        if not o:
+            raise HTTPException(404, "Order not found")
+
+        await cur.execute(
+            """
+            SELECT oi.product_id, oi.sku_id, oi.qty, oi.unit_price, oi.mrp, oi.discount_amt,
+                   oi.gst_pct, oi.gst_amt, oi.line_total, oi.title_snapshot, oi.variant_snapshot
+            FROM order_items oi
+            WHERE oi.order_id=%s
+            ORDER BY oi.id
+            """,
+            (order_id,),
+        )
+        items = await cur.fetchall()
+
+    order = {
+        "id": int(o[0]),
+        "store": {"id": int(o[1]), "display_name": o[2]},
+        "status": o[3],
+        "created_at": o[4].isoformat() if hasattr(o[4], "isoformat") else str(o[4]),
+        "currency": o[5],
+        "totals": {
+            "items_total": float(o[6]),
+            "discount_total": float(o[7]),
+            "shipping_fee": float(o[8]),
+            "tax_total": float(o[9]),
+            "grand_total": float(o[10]),
+        },
+        "address": {
+            "label": o[11], "recipient": o[12], "phone": o[13],
+            "line1": o[14], "line2": o[15], "landmark": o[16],
+            "city": o[17], "state": o[18], "pincode": o[19],
+        },
+        "items": [],
+    }
+
+    for r in items:
+        (product_id, sku_id, qty, unit_price, mrp, disc, gst_pct, gst_amt, line_total, title, variant) = r
+        order["items"].append({
+            "product_id": int(product_id),
+            "sku_id": int(sku_id),
+            "title": title,
+            "qty": int(qty),
+            "unit_price": float(unit_price),
+            "mrp": float(mrp) if mrp is not None else None,
+            "discount_amt": float(disc),
+            "gst_pct": float(gst_pct),
+            "gst_amt": float(gst_amt),
+            "line_total": float(line_total),
+            # optional: if you later expose it in TS types
+            "variant": variant,
+        })
+
+    return {"order": order}

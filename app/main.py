@@ -1,7 +1,26 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.db import init_pool, close_pool
-from app.routers import  addresses, qa, reviews, vendor, appointments, lot_d, auth, uploads, vet,parent, vet_schedule, consult, vaccinations, providers, store, shop, orders, cart, slot_settings, wishlist, parent_prescriptions
+from app.routers import  (addresses,
+                          qa, 
+                          reviews, 
+                          appointments, 
+                          lot_d, 
+                          auth, 
+                          uploads,  
+                          vet,parent, 
+                          vet_schedule, 
+                          consult, 
+                          vaccinations, 
+                          providers, 
+                          store, 
+                          shop, 
+                          orders, 
+                          cart, 
+                          slot_settings, 
+                          wishlist, 
+                          parent_prescriptions,
+                          catalog_admin)
 from fastapi.staticfiles import StaticFiles
 
 import json
@@ -87,9 +106,9 @@ app.include_router(store.router, prefix="/api/v1", tags=["store"])
 app.include_router(shop.router, prefix="/api/v1", tags=["shop"])
 app.include_router(orders.router, prefix="/api/v1", tags=["orders"])
 app.include_router(cart.router, prefix="/api/v1", tags=["cart"])
-app.include_router(vendor.router, prefix="/api/v1", tags=["vendor"])
 
 app.include_router(reviews.router, prefix="/api/v1")
 app.include_router(qa.router, prefix="/api/v1")
 app.include_router(wishlist.router, prefix="/api/v1")
 app.include_router(parent_prescriptions.router, prefix="/api/v1")
+app.include_router(catalog_admin.router, prefix="/api/v1", tags=["catalog_admin"])

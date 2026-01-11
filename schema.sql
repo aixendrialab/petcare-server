@@ -1003,3 +1003,19 @@ DROP CONSTRAINT vet_profiles_slot_minutes_check;
 ALTER TABLE vet_profiles
 ADD CONSTRAINT vet_profiles_slot_minutes_check
 CHECK (slot_minutes > 0);
+
+ALTER TABLE catalog_products
+ADD COLUMN created_by_store_id INT NULL REFERENCES provider_stores(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS ix_catalog_products_created_by_store
+ON catalog_products(created_by_store_id);
+
+ALTER TABLE provider_stores
+  DROP CONSTRAINT IF EXISTS provider_stores_owner_user_id_role_key;
+
+-- if it is an index instead:
+DROP INDEX IF EXISTS provider_stores_owner_user_id_role_key;
+
+-- optionally add a non-unique index for query speed
+CREATE INDEX IF NOT EXISTS ix_provider_stores_owner_role
+  ON provider_stores(owner_user_id, role);

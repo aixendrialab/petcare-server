@@ -16,6 +16,7 @@ class ParentRecentConsult(BaseModel):
 
 class ParentConsultDetail(BaseModel):
     consult_id: int
+    appointment_id: int
     date: datetime
     pet_name: str
     pet_avatar_url: Optional[str]

@@ -307,6 +307,47 @@ def my_appointments(parent_id: int, db: Session = Depends(get_db)) -> Dict[str, 
         ],
     }
 
+@router.get("/appointments/{appointment_id}")
+def parent_get_appointment(
+    appointment_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(require_user),
+):
+    parent_id = int(user["id"])
+
+    row = db.execute(
+        text("""
+            SELECT
+                a.id,
+                a.pet_id,
+                a.parent_id,
+                a.vet_id,
+                p.name AS pet_name,
+                vp.display_name AS vet_name,
+                vl.id AS location_id,
+                vl.name AS location_name,
+                a.start_ts,
+                a.end_ts,
+                a.mode,
+                a.slot_id,
+                a.calendar_state,
+                a.visit_state,
+                a.notes
+            FROM appointments a
+            JOIN pets p ON p.id = a.pet_id
+            LEFT JOIN vet_locations vl ON vl.id = a.location_id
+            LEFT JOIN vet_profiles vp ON vp.user_id = a.vet_id
+            WHERE a.id = :aid
+              AND a.parent_id = :pid
+            LIMIT 1
+        """),
+        {"aid": appointment_id, "pid": parent_id},
+    ).mappings().first()
+
+    if not row:
+        raise HTTPException(404, "Appointment not found")
+
+    return dict(row)
 
 @router.post("/{parent_id}/appointments")
 def book(parent_id: int, slot_id: int, pet_id: int, db: Session = Depends(get_db)):
@@ -548,6 +589,7 @@ def get_parent_consult_detail(
         text("""
         SELECT
             c.id               AS consult_id,
+            a.id               AS appointment_id,
             a.start_ts         AS date,
             p.name             AS pet_name,
             p.picture_uri      AS pet_avatar_url,
@@ -592,6 +634,7 @@ def get_parent_consult_detail(
 
     response = ParentConsultDetail(
         consult_id=row["consult_id"],
+        appointment_id=row["appointment_id"],
         date=row["date"],
         pet_name=row["pet_name"],
         pet_avatar_url=row["pet_avatar_url"],
