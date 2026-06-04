@@ -5,10 +5,13 @@ from pathlib import Path
 import os, shutil
 
 router = APIRouter()
-MEDIA_ROOT = Path("static/uploads")
+# Vercel's filesystem is read-only; use /tmp for writable storage (ephemeral)
+MEDIA_ROOT = Path("/tmp/uploads") if os.getenv("VERCEL") else Path("static/uploads")
 MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
 
-PUBLIC_BASE = os.getenv("PUBLIC_BASE", "http://127.0.0.1:8001")
+# On Vercel, VERCEL_URL is auto-set to the deployment hostname (no https://)
+_vercel_url = os.getenv("VERCEL_URL")
+PUBLIC_BASE = os.getenv("PUBLIC_BASE") or (f"https://{_vercel_url}" if _vercel_url else "http://127.0.0.1:8001")
 
 def require_auth(authorization: str | None):
     if not authorization:
@@ -26,4 +29,4 @@ async def upload_image(file: UploadFile = File(...), authorization: str | None =
     with dest.open("wb") as out:
         shutil.copyfileobj(file.file, out)
 
-    return {"url": f"{os.getenv('PUBLIC_BASE','http://127.0.0.1:8001')}/static/uploads/{name}"}
+    return {"url": f"{PUBLIC_BASE}/static/uploads/{name}"}
