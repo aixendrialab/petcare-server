@@ -1,0 +1,7 @@
+.env
+.dbstack.env
+.venv
+__pycache__
+*.pyc
+.run
+tests
