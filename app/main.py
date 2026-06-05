@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request
+from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.db import init_pool, close_pool
 from .routers import lot_d, auth, uploads, vet,appointments_v2
@@ -25,6 +26,10 @@ async def _startup():
 @app.on_event("shutdown")
 async def _shutdown():
     await close_pool()
+
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse(url="/docs")
 
 # Health
 @app.get("/api/v1/health")
