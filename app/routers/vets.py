@@ -4,6 +4,37 @@ from psycopg.rows import dict_row
 
 router = APIRouter()
 
+@router.get("/vets")
+async def list_vets(limit: int = Query(default=100, le=500)):
+    """Return all registered vets with their primary location."""
+    async with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("""
+            SELECT
+                u.id            AS user_id,
+                u.name,
+                vp.display_name,
+                vp.specialties,
+                vp.visit_in_clinic,
+                vp.visit_video,
+                vp.fee_in_clinic,
+                vp.fee_video,
+                vl.id           AS location_id,
+                vl.name         AS location_name,
+                vl.line1,
+                vl.city,
+                vl.lat,
+                vl.lng,
+                vl.hours
+            FROM vet_profiles vp
+            JOIN users u ON u.id = vp.user_id
+            LEFT JOIN vet_locations vl
+                   ON vl.user_id = vp.user_id AND vl.is_primary = TRUE
+            ORDER BY COALESCE(vp.display_name, u.name)
+            LIMIT %s
+        """, (limit,))
+        rows = await cur.fetchall()
+    return {"vets": rows, "count": len(rows)}
+
 @router.get("/vets/nearby")
 async def vets_nearby(
     lat: float = Query(..., description="Latitude of the search origin"),
