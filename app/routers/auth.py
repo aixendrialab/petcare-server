@@ -104,26 +104,18 @@ async def otp_verify(req: OTPVerify):
     phone = (req.phone or "").strip()
 
     async with get_conn() as conn, conn.cursor() as cur:
-        try:
+        # Check first to avoid UniqueViolation (pool uses autocommit=True)
+        await cur.execute("SELECT id, active_role FROM users WHERE phone=%s", (phone,))
+        row = await cur.fetchone()
+        if row:
+            user_id, active_role = row
+        else:
             await cur.execute(
                 "INSERT INTO users (phone) VALUES (%s) RETURNING id, active_role",
                 (phone,),
             )
             user_id, active_role = await cur.fetchone()
-        except UniqueViolation:
-            # Already exists → fetch it
-            await conn.rollback()  # important before next statement
-            async with conn.cursor() as cur2:
-                await cur2.execute(
-                    "SELECT id, active_role FROM users WHERE phone=%s",
-                    (phone,),
-                )
-                row = await cur2.fetchone()
-                if not row:
-                    raise HTTPException(500, "Failed to load existing user")
-                user_id, active_role = row
 
-        # roles
         await cur.execute(
             "SELECT role FROM user_roles WHERE user_id=%s ORDER BY role",
             (user_id,),
@@ -247,7 +239,6 @@ async def register_profile(body: RegisterProfile, authorization: Optional[str] =
         roles = [{"role": r[0]} for r in await cur.fetchall()]
         active = {"role": u[1]} if u[1] else None
 
-        await conn.commit()
         return {"ok": True, "roles": roles, "active": active}
 
 
@@ -398,7 +389,6 @@ async def add_roles(body: RolesIn, authorization: Optional[str] = Header(None)):
               VALUES (%s, %s)
               ON CONFLICT (user_id, role) DO NOTHING
             """, (user_id, r))
-        await conn.commit()
 
         await cur.execute("SELECT role FROM user_roles WHERE user_id=%s ORDER BY role", (user_id,))
         out = [{"role": r[0]} for r in await cur.fetchall()]
@@ -439,8 +429,6 @@ async def set_active_role(payload: Dict[str, Any], authorization: Optional[str] 
         # fetch roles for response shape the tests expect
         await cur.execute("SELECT role FROM user_roles WHERE user_id=%s ORDER BY role", (user_id,))
         roles = [{"role": r[0]} for r in await cur.fetchall()]
-
-        await conn.commit()
 
     return {"roles": roles, "active": {"role": active_role}}
 
@@ -493,7 +481,6 @@ async def add_pets(body: PetsUpsert, authorization: Optional[str] = Header(None)
               INSERT INTO pets (user_id, name, breed, dob, gender, vaccine_status, rewards, picture_uri)
               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """, (user_id, p.name, p.breed, p.dob, p.gender, p.vaccine_status, p.rewards, p.picture_uri))
-        await conn.commit()
 
     return await list_pets(authorization)
 
@@ -519,7 +506,6 @@ async def replace_pets(body: PetsUpsert, authorization: Optional[str] = Header(N
               INSERT INTO pets (user_id, name, breed, dob, gender, vaccine_status, rewards, picture_uri)
               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """, (user_id, p.name, p.breed, p.dob, p.gender, p.vaccine_status, p.rewards, p.picture_uri))
-        await conn.commit()
 
     return await list_pets(authorization)
 
@@ -535,5 +521,4 @@ async def delete_pet(pet_id: int, authorization: Optional[str] = Header(None)):
         user_id = row[0]
 
         await cur.execute("DELETE FROM pets WHERE id=%s AND user_id=%s", (pet_id, user_id))
-        await conn.commit()
     return {"ok": True}
